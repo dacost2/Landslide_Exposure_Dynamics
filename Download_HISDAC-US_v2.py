@@ -1,8 +1,9 @@
 # %% [markdown]
 # # HISDAC-US Version II Downloader
-# ### Author: D. Acosta-Reyes
-# ### Date: 2026-03-25
-# ### Supervisor: Dr. J. Wartman
+# ##### Author: D. Acosta-Reyes
+# ##### University of Washington, Department of Civil and Environmental Engineering 
+# ##### Date: 2026-03-25
+# ##### Supervisor: Dr. J. Wartman  
 #
 # This script allows you to download HISDAC-US datasets from Harvard Dataverse.
 # 
@@ -221,7 +222,7 @@ try:
 			destination = out_dir / f["filename"]
 			download_datafile(int(f["id"]), destination)
 
-		print("\nDone.")
+		print("\nDone!")
 
 except error.HTTPError as e:
 	if e.code in (401, 403):
