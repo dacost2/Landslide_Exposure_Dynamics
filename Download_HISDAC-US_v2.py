@@ -7,7 +7,7 @@
 #
 # This script allows you to download HISDAC-US datasets from Harvard Dataverse.
 # 
-# Run each cell with Shift+Enter in VS Code.
+# To use, run each cell with Shift+Enter in VS Code.
 #
 # Features:
 # - Choose 1 of 7 HISDAC-US datasets
