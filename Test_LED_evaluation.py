@@ -27,7 +27,7 @@ from pathlib import Path
 import rasterio
 from rasterio.features import shapes
 from rasterio.mask import mask as rio_mask
-from shapely.geometry import shape
+from shapely.geometry import shape, box
 
 # Define data path
 DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data")
@@ -117,6 +117,28 @@ def choose_year(years: list[str]) -> str:
         print("Invalid year. Please pick one of the listed years.")
 
 
+def choose_state_code(state_boundaries: gpd.GeoDataFrame, default_state: str = "WA") -> str:
+    """Ask user to choose a state code from available STUSPS values."""
+    if "STUSPS" not in state_boundaries.columns:
+        raise ValueError("State boundary file is missing STUSPS column.")
+
+    state_codes = sorted(state_boundaries["STUSPS"].dropna().astype(str).unique().tolist())
+    if not state_codes:
+        raise ValueError("No state codes found in state boundary dataset.")
+
+    print("\nAvailable state codes (examples):")
+    print(", ".join(state_codes[:20]) + (" ..." if len(state_codes) > 20 else ""))
+    print(f"Default state: {default_state}")
+
+    while True:
+        selected = input("Choose state code (press Enter for default): ").strip().upper()
+        if selected == "":
+            selected = default_state
+        if selected in state_codes:
+            return selected
+        print("Invalid state code. Please enter a valid STUSPS value (for example WA, OR, CA).")
+
+
 def find_dataset_file(dataset_name: str, dataset_path: Path, year: str) -> Path:
     """Find one HISDAC file for the selected year, preferring shapefile over tif."""
     shp_candidates: list[Path] = []
@@ -196,6 +218,40 @@ def raster_to_polygons(raster_path: Path, clip_boundary: gpd.GeoDataFrame, value
     return gdf
 
 
+def raster_pixels_to_polygons(raster_path: Path, clip_boundary: gpd.GeoDataFrame, value_col: str) -> gpd.GeoDataFrame:
+    """Convert each valid raster pixel to one square polygon (no region merging)."""
+    with rasterio.open(raster_path) as src:
+        raster_crs = src.crs
+        boundary = clip_boundary.to_crs(raster_crs)
+        data, transform = rio_mask(src, boundary.geometry, crop=True)
+
+        band = data[0]
+        nodata = src.nodata
+        if nodata is None:
+            valid_mask = np.ones(band.shape, dtype=bool)
+        elif isinstance(nodata, float) and np.isnan(nodata):
+            valid_mask = ~np.isnan(band)
+        else:
+            valid_mask = band != nodata
+
+        rows, cols = np.where(valid_mask)
+        records: list[dict[str, object]] = []
+        for row, col in zip(rows.tolist(), cols.tolist()):
+            val = float(band[row, col])
+            if np.isnan(val):
+                continue
+
+            x_left, y_top = rasterio.transform.xy(transform, row, col, offset="ul")
+            x_right, y_bottom = rasterio.transform.xy(transform, row, col, offset="lr")
+            geom = box(min(x_left, x_right), min(y_bottom, y_top), max(x_left, x_right), max(y_bottom, y_top))
+            records.append({"geometry": geom, value_col: val})
+
+    if not records:
+        raise ValueError(f"No valid raster pixels found in {raster_path.name}")
+
+    return gpd.GeoDataFrame(records, geometry="geometry", crs=raster_crs)
+
+
 def sample_raster_at_grid(raster_path: Path, grid_gdf: gpd.GeoDataFrame, output_col: str) -> np.ndarray:
     """Sample raster values at grid cell centroids (fast alternative to polygonize+sjoin)."""
     centroids = grid_gdf.geometry.centroid
@@ -268,6 +324,46 @@ def sample_raster_memory_at_points(raster_mem: dict[str, object], points: gpd.Ge
     return np.array(sampled)
 
 
+def create_uniform_master_grid(
+    boundary_gdf: gpd.GeoDataFrame,
+    target_crs: object,
+    cell_size_m: float = 250,
+    clip_to_boundary: bool = True,
+) -> gpd.GeoDataFrame:
+    """Create a uniform fishnet grid from boundary extent in target CRS."""
+    boundary = boundary_gdf.to_crs(target_crs)
+    minx, miny, maxx, maxy = boundary.total_bounds
+
+    x_coords = np.arange(minx, maxx, cell_size_m)
+    y_coords = np.arange(miny, maxy, cell_size_m)
+    cells = [box(x, y, x + cell_size_m, y + cell_size_m) for x in x_coords for y in y_coords]
+
+    grid = gpd.GeoDataFrame({"geometry": cells}, crs=target_crs)
+    if clip_to_boundary:
+        boundary_union = boundary.union_all()
+        grid = grid[grid.geometry.intersects(boundary_union)].copy()
+
+    return grid.reset_index(drop=True)
+
+
+def qc_uniform_pixel_grid(master_grid: gpd.GeoDataFrame, value_col: str = "BUPR_value") -> None:
+    """Quality-control check that master grid cells are uniform raster pixels."""
+    if value_col not in master_grid.columns:
+        raise ValueError(f"Missing expected column: {value_col}")
+
+    areas = master_grid.geometry.area
+    if areas.empty:
+        raise ValueError("Master grid is empty.")
+
+    min_area = float(areas.min())
+    max_area = float(areas.max())
+    if not np.isclose(min_area, max_area, rtol=1e-6, atol=1e-6):
+        raise ValueError(f"Non-uniform grid detected. min_area={min_area}, max_area={max_area}")
+
+    cell_size = np.sqrt(min_area)
+    print(f"QC passed: uniform pixel grid (~{cell_size:.2f} m) with {len(master_grid)} cells")
+
+
 def get_value_column(dataset_name: str, gdf: gpd.GeoDataFrame) -> str:
     """Pick the main numeric value column for aggregation."""
     preferred = f"{dataset_name}_value"
@@ -316,14 +412,87 @@ def attach_led_to_grid(master_grid: gpd.GeoDataFrame, led_gdf: gpd.GeoDataFrame)
     led_counts = led_with_id.groupby("HISDAC_id").size()
     master_grid["LED_count"] = master_grid["HISDAC_id"].map(led_counts).fillna(0).astype(int)
     return master_grid, led_with_id
+
+
+def evaluate_led_vs_bupr(
+    master_grid: gpd.GeoDataFrame,
+    led_col: str = "LED_count",
+    hisdac_col: str = "BUPR_value",
+    state_code: str = "WA",
+    analysis_year: str = "unknown",
+) -> dict[str, float]:
+    """Compare LED counts vs BUPR values with summary metrics and plots."""
+    if led_col not in master_grid.columns:
+        raise ValueError(f"Missing column: {led_col}")
+    if hisdac_col not in master_grid.columns:
+        raise ValueError(f"Missing column: {hisdac_col}")
+
+    eval_df = master_grid[["HISDAC_id", led_col, hisdac_col]].copy()
+    eval_df = eval_df.replace([np.inf, -np.inf], np.nan).dropna(subset=[led_col, hisdac_col])
+
+    if eval_df.empty:
+        raise ValueError("No valid rows found for evaluation.")
+
+    y_true = eval_df[hisdac_col].astype(float).to_numpy()
+    y_pred = eval_df[led_col].astype(float).to_numpy()
+    diff = y_pred - y_true
+
+    rmse = float(np.sqrt(np.mean((diff) ** 2)))
+    mae = float(np.mean(np.abs(diff)))
+    bias = float(np.mean(diff))
+    corr = float(np.corrcoef(y_true, y_pred)[0, 1]) if len(eval_df) > 1 else np.nan
+
+    metrics = {
+        "n_cells": float(len(eval_df)),
+        "correlation": corr,
+        "rmse": rmse,
+        "mae": mae,
+        "bias": bias,
+        "mean_led": float(np.mean(y_pred)),
+        "mean_bupr": float(np.mean(y_true)),
+    }
+
+    print("\nEvaluation Metrics (LED vs BUPR):")
+    for k, v in metrics.items():
+        if k == "n_cells":
+            print(f"- {k}: {int(v)}")
+        else:
+            print(f"- {k}: {v:.4f}")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    axes[0].scatter(y_true, y_pred, s=8, alpha=0.35)
+    min_val = float(min(np.nanmin(y_true), np.nanmin(y_pred)))
+    max_val = float(max(np.nanmax(y_true), np.nanmax(y_pred)))
+    axes[0].plot([min_val, max_val], [min_val, max_val], "k--", linewidth=1)
+    axes[0].set_xlabel("BUPR_value")
+    axes[0].set_ylabel("LED_count")
+    axes[0].set_title(f"{state_code} {analysis_year}: LED vs BUPR")
+
+    axes[1].hist(diff, bins=40, color="steelblue", alpha=0.8)
+    axes[1].axvline(0, color="black", linestyle="--", linewidth=1)
+    axes[1].set_xlabel("Difference (LED_count - BUPR_value)")
+    axes[1].set_ylabel("Grid cell count")
+    axes[1].set_title("Distribution of Differences")
+
+    plt.tight_layout()
+    plt.show()
+
+    return metrics
 # %%
 try:
-    state_code = "WA"
+    default_state_code = "WA"
     fbuy_fixed_file = HISDAC_DATASETS["FBUY"] / "FBUY.tif"
 
     # Load state boundary data
     state_boundaries = gpd.read_file(STATE_BOUNDARY_PATH)
+    state_code = choose_state_code(state_boundaries, default_state=default_state_code)
     wa_boundary = state_boundaries[state_boundaries["STUSPS"] == state_code]
+
+    if wa_boundary.empty:
+        raise ValueError(f"No boundary geometry found for state code: {state_code}")
+
+    print(f"Selected state: {state_code}")
 
     # Extract .tar files in each dataset folder (if any), then discover available years
     year_options = None
@@ -347,22 +516,24 @@ try:
     bupr_file = find_dataset_file("BUPR", bupr_path, analysis_year)
     print(f"\n1) Found BUPR: {bupr_file}")
 
-    # 2) Clip to WA and polygonize when needed to create master grid.
-    if bupr_file.suffix.lower() == ".shp":
-        master_grid = gpd.read_file(bupr_file)
-        master_grid = gpd.clip(master_grid, wa_boundary.to_crs(master_grid.crs))
-    else:
-        master_grid = raster_to_polygons(bupr_file, wa_boundary, value_col="BUPR_value")
+    if bupr_file.suffix.lower() != ".tif":
+        raise ValueError("BUPR master-grid workflow expects a raster (.tif) file.")
+
+    # 2) Create master grid from BUPR pixels (each pixel -> one square polygon).
+    master_grid = raster_pixels_to_polygons(
+        raster_path=bupr_file,
+        clip_boundary=wa_boundary,
+        value_col="BUPR_value",
+    )
+    print(f"2) Created raster-derived master grid with {len(master_grid)} cells")
 
     # 3) Create HISDAC_id.
     master_grid = master_grid.copy().reset_index(drop=True)
     master_grid["HISDAC_id"] = np.arange(1, len(master_grid) + 1)
-    print(f"2) Created WA master grid with {len(master_grid)} cells")
+    print(f"3) Added HISDAC_id to {len(master_grid)} grid cells")
 
-    # Keep BUPR source values on the master grid.
-    bupr_value_col = get_value_column("BUPR", master_grid)
-    master_grid["BUPR_sum"] = master_grid[bupr_value_col]
-    print("3) Added BUPR_sum to master grid")
+    # QC: ensure this is a uniform pixel grid from source raster.
+    qc_uniform_pixel_grid(master_grid, value_col="BUPR_value")
 
     # 4) Get centroids with HISDAC_id keys.
     centroid_table = gpd.GeoDataFrame(
@@ -372,8 +543,9 @@ try:
     )
     print(f"4) Built centroid table with {len(centroid_table)} points")
 
-    # 5) Load other rasters to memory.
+    # 5) Load auxiliary rasters to memory.
     raster_memory: dict[str, dict[str, object]] = {}
+
     for name, path in HISDAC_DATASETS.items():
         if name == "BUPR":
             continue
@@ -415,7 +587,10 @@ try:
     print("7) Merged sampled raster values into master grid")
 
     # 8) Load LED data.
-    led_results = gpd.read_file(TESTING_SET_PATH / "WA_LED_points-5070.gpkg")
+    led_file = TESTING_SET_PATH / f"{state_code}_LED_points-5070.gpkg"
+    if not led_file.exists():
+        raise FileNotFoundError(f"LED file not found for state {state_code}: {led_file}")
+    led_results = gpd.read_file(led_file)
 
     # 9) Spatial join to add HISDAC_id to buildings.
     master_grid, led_with_id = attach_led_to_grid(master_grid, led_results)
@@ -436,7 +611,23 @@ try:
     summary_cols = [c for c in master_grid.columns if c.startswith(("BUPR_", "BUPL_", "BUA_", "BUI_", "FBUY_", "LED_count"))]
     print("\nMaster grid summary:")
     print(master_grid[["HISDAC_id"] + summary_cols].head())
+
+    # Evaluate agreement between LED counts and BUPR values.
+    metrics = evaluate_led_vs_bupr(
+        master_grid=master_grid,
+        led_col="LED_count",
+        hisdac_col="BUPR_value",
+        state_code=state_code,
+        analysis_year=analysis_year,
+    )
+
+    metrics_out = TESTING_SET_PATH / f"{state_code}_{analysis_year}_LED_vs_BUPR_metrics.csv"
+    pd.DataFrame([metrics]).to_csv(metrics_out, index=False)
+    print(f"Saved evaluation metrics: {metrics_out}")
+
 except Exception as e:
     print(f"An error occurred: {e}")
 
+# %%
+'''Evaluation is now performed automatically in the main workflow.'''
 # %%
