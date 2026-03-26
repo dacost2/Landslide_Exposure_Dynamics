@@ -24,6 +24,10 @@ import numpy as np
 import tarfile
 import re
 from pathlib import Path
+import rasterio
+from rasterio.features import shapes
+from rasterio.mask import mask as rio_mask
+from shapely.geometry import shape
 
 # Define data path
 DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data")
@@ -42,6 +46,15 @@ HISDAC_DATASETS = {
     "FUPY": HISDAC_PATH / "Historical_Settlement_Year_Built_Layer_1810-2020_V2"
 }
 
+AGG_RULES = {
+    "BUPR": "sum",
+    "BUPL": "sum",
+    "BUA": "sum",
+    "BUI": "mean",
+    "FUPY": "mean",
+}
+# %%
+'''Define helper functions for data processing and evaluation.'''
 
 def extract_tar_files(dataset_path: Path) -> None:
     """Extract all .tar files in a dataset folder if present."""
@@ -126,6 +139,81 @@ def find_dataset_file(dataset_name: str, dataset_path: Path, year: str) -> Path:
         return tif_candidates[0]
 
     raise FileNotFoundError(f"No file found for {dataset_name}, year {year}")
+
+
+def raster_to_polygons(raster_path: Path, clip_boundary: gpd.GeoDataFrame, value_col: str) -> gpd.GeoDataFrame:
+    """Convert raster pixels to polygons and keep valid pixel values."""
+    with rasterio.open(raster_path) as src:
+        raster_crs = src.crs
+        boundary = clip_boundary.to_crs(src.crs)
+        data, transform = rio_mask(src, boundary.geometry, crop=True)
+
+        band = data[0]
+        nodata = src.nodata
+        valid_mask = np.ones(band.shape, dtype=bool) if nodata is None else band != nodata
+
+        records: list[dict[str, object]] = []
+        for geom, value in shapes(band, mask=valid_mask, transform=transform):
+            val = float(value)
+            if np.isnan(val):
+                continue
+            records.append({"geometry": shape(geom), value_col: val})
+
+    if not records:
+        raise ValueError(f"No valid raster cells found in {raster_path.name}")
+
+    gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=raster_crs)
+    return gdf
+
+
+def get_value_column(dataset_name: str, gdf: gpd.GeoDataFrame) -> str:
+    """Pick the main numeric value column for aggregation."""
+    preferred = f"{dataset_name}_value"
+    if preferred in gdf.columns:
+        return preferred
+
+    numeric_cols = [c for c in gdf.columns if c != "geometry" and pd.api.types.is_numeric_dtype(gdf[c])]
+    if numeric_cols:
+        return numeric_cols[0]
+
+    gdf[f"{dataset_name}_count"] = 1
+    return f"{dataset_name}_count"
+
+
+def aggregate_to_master_grid(
+    master_grid: gpd.GeoDataFrame,
+    source_gdf: gpd.GeoDataFrame,
+    source_col: str,
+    out_col: str,
+    agg_func: str,
+) -> gpd.GeoDataFrame:
+    """Spatially join source data to master grid and aggregate by HISDAC_id."""
+    source_in_master_crs = source_gdf.to_crs(master_grid.crs)
+    joined = gpd.sjoin(
+        source_in_master_crs[[source_col, "geometry"]],
+        master_grid[["HISDAC_id", "geometry"]],
+        how="inner",
+        predicate="intersects",
+    )
+
+    aggregated = joined.groupby("HISDAC_id")[source_col].agg(agg_func)
+    master_grid[out_col] = master_grid["HISDAC_id"].map(aggregated)
+    return master_grid
+
+
+def attach_led_to_grid(master_grid: gpd.GeoDataFrame, led_gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Attach HISDAC_id to LED points and count LED points in each grid cell."""
+    led_in_master_crs = led_gdf.to_crs(master_grid.crs)
+    led_with_id = gpd.sjoin(
+        led_in_master_crs,
+        master_grid[["HISDAC_id", "geometry"]],
+        how="left",
+        predicate="within",
+    )
+
+    led_counts = led_with_id.groupby("HISDAC_id").size()
+    master_grid["LED_count"] = master_grid["HISDAC_id"].map(led_counts).fillna(0).astype(int)
+    return master_grid, led_with_id
 # %%
 try:
     state_code = "WA"
@@ -156,31 +244,49 @@ try:
         print(f"Found {name}: {data_file}")
 
         if data_file.suffix.lower() == ".shp":
-            hisdac_data[name] = gpd.read_file(data_file)
+            gdf = gpd.read_file(data_file)
+            hisdac_data[name] = gpd.clip(gdf, wa_boundary.to_crs(gdf.crs))
         else:
-            # For now, raster (.tif) files are listed and skipped in vector-only workflow.
-            print(f"Skipping {name}: {data_file.name} is raster (.tif), not vector (.shp).")
+            hisdac_data[name] = raster_to_polygons(data_file, wa_boundary, value_col=f"{name}_value")
 
-    # Clip loaded vector HISDAC-US data to Washington boundary
-    clipped_hisdac_data = {}
+    if "BUPR" not in hisdac_data:
+        raise ValueError("BUPR is required to build the master HISDAC grid.")
+
+    # Build master grid from BUPR and assign unique HISDAC_id.
+    master_grid = hisdac_data["BUPR"].copy().reset_index(drop=True)
+    master_grid["HISDAC_id"] = np.arange(1, len(master_grid) + 1)
+
+    # Aggregate each HISDAC dataset to the BUPR master grid.
     for name, gdf in hisdac_data.items():
-        clipped_hisdac_data[name] = gpd.clip(gdf, wa_boundary)
+        source_col = get_value_column(name, gdf)
+        agg_func = AGG_RULES.get(name, "mean")
+        out_col = f"{name}_{agg_func}"
+
+        if name == "BUPR":
+            master_grid[out_col] = master_grid[source_col]
+            print(f"Assigned {name} -> {out_col} from master grid source values")
+            continue
+
+        master_grid = aggregate_to_master_grid(master_grid, gdf, source_col, out_col, agg_func)
+        print(f"Aggregated {name} -> {out_col}")
 
     # Load LED results for Washington
-    led_results = gpd.read_file(TESTING_SET_PATH / "LED_WA_Results.shp")
+    led_results = gpd.read_file(TESTING_SET_PATH / "WA_LED_points-5070.gpkg")
+    master_grid, led_with_id = attach_led_to_grid(master_grid, led_results)
+    print("Linked LED points to master grid using HISDAC_id.")
 
-    # Compare LED results with HISDAC-US data
-    evaluation_metrics = {}
-    for name, gdf in clipped_hisdac_data.items():
-        # Example metric: Intersection over Union (IoU) for built-up areas
-        if name == "BUA":
-            iou = np.sum(led_results.geometry.intersects(gdf.geometry)) / np.sum(led_results.geometry.union(gdf.geometry))
-            evaluation_metrics[name] = iou
+    # Save outputs for downstream LED evaluation.
+    master_out = TESTING_SET_PATH / f"{state_code}_{analysis_year}_HISDAC_master_grid.gpkg"
+    led_out = TESTING_SET_PATH / f"{state_code}_{analysis_year}_LED_with_HISDAC_id.gpkg"
+    master_grid.to_file(master_out, driver="GPKG")
+    led_with_id.to_file(led_out, driver="GPKG")
+    print(f"Saved master grid: {master_out}")
+    print(f"Saved LED joined points: {led_out}")
 
-    # Print evaluation metrics
-    print("Evaluation Metrics:")
-    for name, metric in evaluation_metrics.items():
-        print(f"{name}: {metric:.4f}")
+    # Show quick summary of selected aggregated fields.
+    summary_cols = [c for c in master_grid.columns if c.startswith(("BUPR_", "BUPL_", "BUA_", "BUI_", "FUPY_", "LED_count"))]
+    print("\nMaster grid summary:")
+    print(master_grid[["HISDAC_id"] + summary_cols].head())
 except Exception as e:
     print(f"An error occurred: {e}")
-
+    
