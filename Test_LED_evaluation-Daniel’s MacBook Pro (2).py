@@ -803,5 +803,3 @@ axes[1].set_axis_off()
 plt.tight_layout()
 plt.show()
 
-
-# %%
