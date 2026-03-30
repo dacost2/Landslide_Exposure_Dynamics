@@ -40,9 +40,9 @@ TESTING_SET_PATH = DATA_PATH / "Testing_Set"
 # List of HISDAC-US datasets to evaluate
 HISDAC_DATASETS = {
     "BUPR": HISDAC_PATH / "Historical_Built-up_Records_BUPR_V2",
-    #"BUPL": HISDAC_PATH / "Historical_Built-up_Property_Locations_BUPL_V2",
+    "BUPL": HISDAC_PATH / "Historical_Built-up_Property_Locations_BUPL_V2",
     #"BUA": HISDAC_PATH / "Historical_Built-up_Areas_BUA_V2",
-    "BUI": HISDAC_PATH / "Historical_Built-up_Intensity_Layer_BUI_V2",
+    #"BUI": HISDAC_PATH / "Historical_Built-up_Intensity_Layer_BUI_V2",
     "FBUY": HISDAC_PATH / "Historical_Settlement_Year_Built_Layer_1810-2020_V2"
 }
 
