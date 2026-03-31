@@ -1,3 +1,4 @@
+# %% 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -92,14 +93,14 @@ ax2.legend(loc='upper left')
 ax2.grid(axis='both', linestyle='--', alpha=0.7)
 
 # Add a Statistical Summary Text Box to the Cumulative Plot
-stats_text = (
+stats_text = print((
     f"Statewide Statistical Agreement\n"
     f"-------------------------------\n"
     f"$R^2$ (Temporal Match): {r_squared:.3f}\n"
     f"Mean Error (Bias): {mean_error:,.0f} units/5-yrs\n"
     f"FBUY Pass Rate ($\ge$ FBUY-5): {fbuy_pass_rate:.1f}%\n"
     f"Total LED Analyzed: {master_df[led_cols].sum().sum():,.0f}"
-)
+))
 
 # Place text box in lower right
 props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
@@ -116,3 +117,66 @@ print(f"\n--- FBUY Anchor Assessment ---")
 print(f"Total Buildings in Valid HISDAC Pixels: {valid_buildings_total:,.0f}")
 print(f"Buildings Passing the FBUY Test: {passed_buildings_total:,.0f}")
 print(f"Pass Rate: {fbuy_pass_rate:.2f}%")
+# %%
+
+print("1) Applying Corrected High-Confidence Filters...")
+
+# Setup arrays
+years = list(range(1920, 2025, 5))
+year_array = np.array(years)
+led_presence = master_df[led_cols] > 0
+first_led_year_per_pixel = np.where(led_presence, year_array, 9999).min(axis=1)
+total_led_per_pixel = master_df[led_cols].sum(axis=1)
+
+# --- THE TEMPORAL MASK ---
+# Path A: HISDAC exists, and the LED passes the anchor test
+passes_fbuy = (
+    master_df['FBUY'].notna() & 
+    (first_led_year_per_pixel != 9999) & 
+    (first_led_year_per_pixel >= (master_df['FBUY'] - 5))
+)
+
+# Path B: HISDAC is completely missing, but LED confirms buildings exist
+# (These are the critical gaps your inventory fills)
+missing_hisdac_but_has_led = master_df['FBUY'].isna() & (total_led_per_pixel > 0)
+
+# Combine the temporal paths
+temporal_confidence_mask = passes_fbuy | missing_hisdac_but_has_led
+
+# --- THE DENSITY MASK ---
+# Density must be <= 3.0 to drop high-rises. 
+# If density is NaN (because HISDAC is missing), we keep it.
+DENSITY_THRESHOLD = 3.0
+density_mask = master_df['DENSITY'].isna() | (master_df['DENSITY'] <= DENSITY_THRESHOLD)
+
+# --- THE FINAL MASK ---
+high_confidence_mask = temporal_confidence_mask & density_mask
+high_conf_df = master_df[high_confidence_mask]
+
+# --- Recalculate Stats ---
+print("2) Recalculating Metrics on Corrected Set...")
+
+hc_hisdac_deltas = high_conf_df[hisdac_cols].sum().values
+hc_led_deltas = high_conf_df[led_cols].sum().values
+
+hc_mean_error = np.mean(hc_led_deltas - hc_hisdac_deltas)
+
+hc_ss_res = np.sum((hc_led_deltas - hc_hisdac_deltas)**2)
+hc_ss_tot = np.sum((hc_led_deltas - np.mean(hc_led_deltas))**2)
+hc_r_squared = 1 - (hc_ss_res / hc_ss_tot)
+
+buildings_retained = high_conf_df[led_cols].sum().sum()
+original_total = master_df[led_cols].sum().sum()
+retention_rate = (buildings_retained / original_total) * 100
+
+print("\n=== CORRECTED HIGH-CONFIDENCE DASHBOARD ===")
+print(f"High-Confidence R^2:   {hc_r_squared:.3f}")
+print(f"High-Conf Mean Error:  {hc_mean_error:,.0f} units/5-yrs")
+print(f"Total Buildings Retained: {buildings_retained:,.0f} ({retention_rate:.1f}% of total)")
+print(f"Total Pixels Retained:    {len(high_conf_df):,.0f} pixels")
+print("===========================================")
+
+# Save the matrix
+high_conf_out_path = TESTING_SET_PATH / f"{state_code}_High_Confidence_Matrix.parquet"
+high_conf_df.to_parquet(high_conf_out_path, index=False)
+# %%

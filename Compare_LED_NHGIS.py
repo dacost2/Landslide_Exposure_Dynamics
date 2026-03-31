@@ -416,3 +416,4 @@ handles, labels = axes[0].get_legend_handles_labels()
 fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.99))
 plt.tight_layout(rect=[0, 0, 1, 0.97])
 plt.show()
+# %%
