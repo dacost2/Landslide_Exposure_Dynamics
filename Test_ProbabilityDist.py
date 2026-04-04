@@ -1,3 +1,4 @@
+# %%
 import pandas as pd
 import numpy as np
 from scipy.stats import norm
@@ -32,7 +33,7 @@ def generate_probability_array(row):
     
     # Extract variables
     led_year = row['semi_decade']
-    source = row.get('source', 'unknown')
+    source_nsi = row.get('source_nsi', 'unknown')
     stories = row.get('num_story', 1)
     if pd.isna(stories): stories = 1
     
@@ -66,7 +67,7 @@ def generate_probability_array(row):
             return prob_array / np.sum(prob_array) if np.sum(prob_array) > 0 else base_dist
 
     # TIER 3: Deficit Allocation (nsi_estimated)
-    if source == 'nsi_estimated':
+    if source_nsi == 'nsi_estimated':
         recent_idx = slice(16, 21) # 2000-2020
         deficits = np.maximum(0, hisdac_bupl[recent_idx] - led_counts[recent_idx])
         if np.sum(deficits) > 0:
@@ -99,7 +100,7 @@ import seaborn as sns
 import numpy as np
 import pandas as pd
 
-# Assuming led_df is loaded and contains 'prob_distribution', 'semi_decade', and 'source'
+# Assuming led_df is loaded and contains 'prob_distribution', 'semi_decade', and 'source_nsi'
 print("\n4) Generating Probability Engine Visualizations...")
 
 # --- Data Prep: Unpack the Probability Arrays ---
@@ -145,22 +146,22 @@ axs[1].axvline(1.0, color='black', linestyle='--', label='Tier 1 (Missing HISDAC
 axs[1].axvline(0.047, color='red', linestyle='--', label='Tier 4 Baseline (Perfectly Flat 1/21)')
 axs[1].legend()
 
-# --- 3. Source Signatures (Average Probability Curves) ---
-# Group by Overture source to prove the behavioral logic worked
-sources = led_df['source'].unique()
+# --- 3. source_nsi Signatures (Average Probability Curves) ---
+# Group by Overture source_nsi to prove the behavioral logic worked
+sources = led_df['source_nsi'].unique()
 
 for src in sources:
     if pd.isna(src): continue
-    # Get all arrays for this specific source
-    src_mask = led_df['source'] == src
+    # Get all arrays for this specific source_nsi
+    src_mask = led_df['source_nsi'] == src
     src_matrix = prob_matrix[src_mask]
     
     if len(src_matrix) > 0:
-        # Calculate the average curve shape for this source
+        # Calculate the average curve shape for this source_nsi
         avg_curve = np.mean(src_matrix, axis=0)
-        axs[2].plot(YEARS, avg_curve, marker='o', linewidth=2, label=f"Source: {src} (n={len(src_matrix):,})")
+        axs[2].plot(YEARS, avg_curve, marker='o', linewidth=2, label=f"source_nsi: {src} (n={len(src_matrix):,})")
 
-axs[2].set_title('Behavioral Signatures: Average Probability Distribution by Source', fontsize=14)
+axs[2].set_title('Behavioral Signatures: Average Probability Distribution by source_nsi', fontsize=14)
 axs[2].set_xlabel('Year')
 axs[2].set_ylabel('Average Probability Weight')
 axs[2].set_xticks(YEARS)

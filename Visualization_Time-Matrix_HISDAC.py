@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import geopandas as gpd
 from pathlib import Path
 
 # --- Setup Paths ---
@@ -179,4 +180,44 @@ print("===========================================")
 # Save the matrix
 high_conf_out_path = TESTING_SET_PATH / f"{state_code}_High_Confidence_Matrix.parquet"
 high_conf_df.to_parquet(high_conf_out_path, index=False)
+# %%
+
+# %%
+# Convert joined LED parquet to GeoPackage
+parquet_path = TESTING_SET_PATH / 'WA_LED_Joined_Buildings.parquet'
+gpkg_path = parquet_path.with_suffix('.gpkg')
+
+print(f"Loading: {parquet_path}")
+try:
+    led_joined_gdf = gpd.read_parquet(parquet_path)
+except ImportError as e:
+    raise ImportError(
+        "Parquet support is missing in the active environment. Install pyarrow (or fastparquet) and rerun."
+    ) from e
+except Exception:
+    # Fallback for non-GeoParquet files.
+    led_joined_df = pd.read_parquet(parquet_path)
+    if 'geometry' in led_joined_df.columns:
+        led_joined_gdf = gpd.GeoDataFrame(led_joined_df, geometry='geometry')
+    elif 'HISDAC_id' in led_joined_df.columns:
+        # Rebuild geometry from the HISDAC spatial anchor using pixel ID.
+        anchor_path = TESTING_SET_PATH / f"{state_code}_HISDAC_Spatial_Anchor.gpkg"
+        anchor_gdf = gpd.read_file(anchor_path)[['HISDAC_id', 'geometry']]
+        rebuilt = led_joined_df.merge(anchor_gdf, on='HISDAC_id', how='left')
+        missing_geometry = rebuilt['geometry'].isna().sum()
+        if missing_geometry > 0:
+            raise ValueError(
+                f"Could not rebuild geometry for {missing_geometry} rows using HISDAC_id from {anchor_path}."
+            )
+        led_joined_gdf = gpd.GeoDataFrame(rebuilt, geometry='geometry', crs=anchor_gdf.crs)
+    else:
+        raise ValueError(
+            "Parquet has no geometry and no HISDAC_id column to rebuild geometry. Cannot export to GPKG."
+        )
+
+print(f"Saving: {gpkg_path}")
+led_joined_gdf.to_file(gpkg_path, driver='GPKG')
+
+print("SUCCESS! GeoPackage saved.")
+
 # %%

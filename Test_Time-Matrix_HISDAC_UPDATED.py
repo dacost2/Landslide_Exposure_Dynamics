@@ -26,6 +26,7 @@ DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA Ge
 HISDAC_PATH = DATA_PATH / "HISDAC_US_V2"
 STATE_BOUNDARY_PATH = DATA_PATH / "cb_2024_us_state_500k.zip"
 TESTING_SET_PATH = DATA_PATH / "Testing_Set"
+BUILDING_INVENTORY_PATH = DATA_PATH / "LED_by_State"
 
 HISDAC_DATASETS = {
     "BUPR": HISDAC_PATH / "Historical_Built-up_Records_BUPR_V2",
@@ -59,8 +60,8 @@ def get_available_years(dataset_path: Path, dataset_name: str) -> list[str]:
     return sorted(years)
 
 
-def choose_state_code(state_boundaries: gpd.GeoDataFrame, default_state: str = "WA") -> str:
-    """Ask user to choose a state code from available STUSPS values."""
+def choose_state_code(state_boundaries: gpd.GeoDataFrame, default_state: str = "WA") -> tuple[str, str]:
+    """Ask user to choose a state code or full state name and return (STUSPS, state_name)."""
     if "STUSPS" not in state_boundaries.columns:
         raise ValueError("State boundary file is missing STUSPS column.")
 
@@ -68,17 +69,38 @@ def choose_state_code(state_boundaries: gpd.GeoDataFrame, default_state: str = "
     if not state_codes:
         raise ValueError("No state codes found in state boundary dataset.")
 
+    # Keep only states that exist in both state boundaries and state_dict.
+    valid_codes = [code for code in state_codes if code in state_dict]
+    if not valid_codes:
+        raise ValueError("No overlapping state codes found between boundaries and state_dict.")
+
+    code_to_name = {code: state_dict[code] for code in valid_codes}
+    name_to_code = {name.lower(): code for code, name in code_to_name.items()}
+
     print("\nAvailable state codes (examples):")
-    print(", ".join(state_codes[:20]) + (" ..." if len(state_codes) > 20 else ""))
+    print(", ".join(valid_codes[:20]) + (" ..." if len(valid_codes) > 20 else ""))
+    print("You can enter either state code (for example WA) or full name (for example Washington).")
     print(f"Default state: {default_state}")
 
     while True:
-        selected = input("Choose state code (press Enter for default): ").strip().upper()
-        if selected == "":
-            selected = default_state
-        if selected in state_codes:
-            return selected
-        print("Invalid state code. Please enter a valid STUSPS value (for example WA, OR, CA).")
+        selected_raw = input("Choose state code or full name (press Enter for default): ").strip()
+
+        # Empty input -> default code.
+        if selected_raw == "":
+            selected_code = default_state.upper()
+            if selected_code in code_to_name:
+                return selected_code, code_to_name[selected_code]
+
+        selected_upper = selected_raw.upper()
+        if selected_upper in code_to_name:
+            return selected_upper, code_to_name[selected_upper]
+
+        selected_lower = selected_raw.lower()
+        if selected_lower in name_to_code:
+            code = name_to_code[selected_lower]
+            return code, code_to_name[code]
+
+        print("Invalid state input. Enter a valid STUSPS code (WA) or full state name (Washington).")
 
 
 def find_dataset_file(dataset_name: str, dataset_path: Path, year: str | None = None) -> Path:
@@ -179,6 +201,60 @@ def semidecade_from_med_yr_blt(series: pd.Series, baseline_year: int = 1920, max
     
     return pd.Series(semi_decade, index=series.index)
 
+state_dict = {
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "DC": "District of Columbia",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
+}
+
 
 # %%
 # --- MAIN EXECUTION BLOCK ---
@@ -187,9 +263,9 @@ try:
     
     # 1. Setup and Boundaries
     state_boundaries = gpd.read_file(STATE_BOUNDARY_PATH)
-    state_code = choose_state_code(state_boundaries, default_state=default_state_code)
+    state_code, state_name = choose_state_code(state_boundaries, default_state=default_state_code)
     wa_boundary = state_boundaries[state_boundaries["STUSPS"] == state_code]
-    print(f"Selected state: {state_code}")
+    print(f"Selected state: {state_name} ({state_code})")
 
     # 2. Establish the Spatial Anchor using BUPL 2020 as the base grid
     bupl_2020_file = find_dataset_file("BUPL", HISDAC_DATASETS["BUPL"], "2020")
@@ -300,11 +376,11 @@ except Exception as e:
 
 # --- 1. Define led_joined (The Spatial Link) ---
 print("1) Loading Spatial Anchor and LED Inventory...")
-spatial_anchor_path = TESTING_SET_PATH / f"{state_code}_HISDAC_Spatial_Anchor.gpkg"
-led_file_path = TESTING_SET_PATH / f"{state_code}_LED_points-5070.gpkg"
+# spatial_anchor_path = TESTING_SET_PATH / f"{state_code}_HISDAC_Spatial_Anchor.gpkg"
+led_file_path = BUILDING_INVENTORY_PATH / f"{state_name}_LED.parquet"
 
-spatial_anchor = gpd.read_file(spatial_anchor_path)
-led_points = gpd.read_file(led_file_path)
+# spatial_anchor = gpd.read_file(spatial_anchor_path)
+led_points = gpd.read_parquet(led_file_path)
 
 print("2) Spatially joining LED buildings to HISDAC grid...")
 # Ensure CRS matches before joining
