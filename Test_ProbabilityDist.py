@@ -8,7 +8,7 @@ from tqdm import tqdm # Great for progress bars on big datasets
 # --- Setup ---
 DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data")
 TESTING_SET_PATH = DATA_PATH / "Testing_Set"
-state_code = "WA"
+state_code = "WA"  # Ensure this matches your previous runs
 YEARS = np.arange(1920, 2025, 5)
 
 print("1) Loading Datasets...")
@@ -88,11 +88,50 @@ print("2) Generating Probabilities...")
 # Using tqdm to show progress on massive datasets
 tqdm.pandas(desc="Calculating Probability Arrays")
 led_df['prob_distribution'] = led_df.progress_apply(generate_probability_array, axis=1)
+# %%
+import geopandas as gpd
 
-print("\n3) Saving Monte Carlo Engine...")
-out_path = TESTING_SET_PATH / f"{state_code}_LED_Monte_Carlo_Engine.parquet"
-led_df.to_parquet(out_path, index=False)
-print(f"SUCCESS! Engine saved to: {out_path}")
+# ... [rest of your probability function and tqdm code above remains exactly the same] ...
+
+# load the LED inventory as a GeoDataFrame (assuming it has a geometry column)
+led_gdf = gpd.read_file(TESTING_SET_PATH / f"{state_code}_LED_Joined_Buildings.gpkg")
+
+print("\n3) Calculating Expected and Most Likely Years...")
+# 1. Stack all the probability arrays into a massive 2D matrix (2.8M rows, 21 columns)
+prob_matrix = np.stack(led_df['prob_distribution'].values)
+
+# 2. Calculate Expected Value (Mean)
+led_df['expected_year_built'] = np.sum(prob_matrix * YEARS, axis=1)
+
+# 3. Calculate Maximum A Posteriori (MAP - Most Likely Single Year)
+led_df['most_likely_year'] = YEARS[np.argmax(prob_matrix, axis=1)]
+
+
+print("\n4) Saving Master Parquet Engine...")
+out_parquet = TESTING_SET_PATH / f"{state_code}_LED_Monte_Carlo_Engine.parquet"
+# Parquets handle array columns perfectly, so we save the full version here
+led_df.to_parquet(out_parquet, index=False)
+print(f"SUCCESS! Parquet Engine saved to: {out_parquet}")
+
+
+print("\n5) Preparing and Saving GIS GeoPackage...")
+# 1. Drop the array column so GeoPackage doesn't crash
+gis_df = led_df.drop(columns=['prob_distribution'])
+
+# 2. THE FIX: Bypass the merge explosion. 
+# We use a direct index join (or direct assignment) to attach the geometry in milliseconds.
+# (This assumes both dataframes still share the same index order from when they were created)
+gis_df['geometry'] = led_gdf['geometry'].values
+
+# 3. Convert to GeoDataFrame
+gdf = gpd.GeoDataFrame(gis_df, geometry='geometry', crs=led_gdf.crs)
+
+out_gpkg = TESTING_SET_PATH / f"{state_code}_LED_Monte_Carlo_Engine.gpkg"
+
+print(f"   -> Writing 2.8 million geometries to disk (This may take 5-10 minutes)...")
+# 4. Save to GeoPackage
+gdf.to_file(out_gpkg, driver='GPKG')
+print(f"SUCCESS! GIS GeoPackage saved to: {out_gpkg}")
 
 # %%
 import matplotlib.pyplot as plt
@@ -117,7 +156,7 @@ expected_buildings_per_year = np.sum(prob_matrix, axis=0)
 original_counts = led_df['semi_decade'].value_counts().reindex(YEARS, fill_value=0).values
 
 fig, axs = plt.subplots(3, 1, figsize=(14, 18))
-fig.suptitle(f"Monte Carlo Engine Analytics: {state_code}", fontsize=18, fontweight='bold')
+fig.suptitle(f"LED Probability Distribution in Time: {state_code}", fontsize=18, fontweight='bold')
 
 # Plot 1
 width = 1.8
@@ -171,3 +210,81 @@ axs[2].grid(axis='both', linestyle='--', alpha=0.5)
 
 plt.tight_layout(rect=[0, 0.03, 1, 0.97])
 plt.show()
+# %%
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+# Assume led_df is your Monte Carlo engine dataframe
+# Assume master_df is your Phase 1 Wide Matrix containing the 'D_BUPLXXXX' columns
+
+print("\n4) Generating Tri-Curve Performance Visualization...")
+
+prob_matrix = np.stack(led_df['prob_distribution'].values)
+YEARS = np.arange(1920, 2025, 5)
+
+# 1. Expected Value (Posterior)
+expected_buildings = np.sum(prob_matrix, axis=0)
+
+# 2. Original LED (Prior)
+original_led_counts = led_df['semi_decade'].value_counts().reindex(YEARS, fill_value=0).values
+
+# 3. Original HISDAC (Ground Truth Baseline)
+# We sum the raw BUPL deltas for the entire state
+hisdac_counts = np.array([master_df[f'D_BUPL{y}'].sum() for y in YEARS])
+
+fig, ax = plt.subplots(figsize=(14, 6))
+fig.suptitle(f"Model Performance: Resolving the Spatial-Temporal Discrepancy", fontsize=16, fontweight='bold')
+
+width = 1.6
+
+# Plot the rigid block-level LED clumping
+ax.bar(YEARS - width/2, original_led_counts, width=width, label='Original LED (Census Block Clumping)', color='#ff7f0e', alpha=0.5)
+
+# Plot our new Probabilistic Expected Value
+ax.bar(YEARS + width/2, expected_buildings, width=width, label='Expected LED (Probabilistic Posterior)', color='#2ca02c', alpha=0.8)
+
+# Overlay the raw HISDAC tax records as a solid trend line
+ax.plot(YEARS, hisdac_counts, color='blue', marker='o', linestyle='-', linewidth=2.5, markersize=6, label='Raw HISDAC (Historical Tax Records)')
+
+ax.set_title('Macro-Validation: Aligning Modern Footprints with Historical Taxation', fontsize=14)
+ax.set_ylabel('Number of Buildings Added')
+ax.set_xticks(YEARS)
+ax.tick_params(axis='x', rotation=45)
+ax.grid(axis='y', linestyle='--', alpha=0.5)
+ax.legend(loc='upper left')
+
+plt.tight_layout()
+plt.show()
+# %%
+# --- Macro-Validation Statistics ---
+# Assuming 'expected_buildings' and 'hisdac_counts' were generated in the plot code above
+
+import numpy as np
+
+print("\n5) Calculating Macro-Validation Metrics...")
+
+# 1. Pearson Correlation (r)
+# Measures how perfectly the shapes of the two curves match (peaks and valleys)
+correlation_matrix = np.corrcoef(hisdac_counts, expected_buildings)
+r_value = correlation_matrix[0, 1]
+
+# 2. R-squared (R^2)
+# Measures the proportion of variance in the historical tax records explained by your model
+r_squared = r_value ** 2
+
+# 3. Root Mean Square Error (RMSE)
+# Penalizes large deviations heavily. Tells you the average error in actual building counts.
+rmse = np.sqrt(np.mean((expected_buildings - hisdac_counts)**2))
+
+# 4. Mean Absolute Error (MAE)
+# A more intuitive "average distance" between the two lines
+mae = np.mean(np.abs(expected_buildings - hisdac_counts))
+
+print("\n=== MACRO-VALIDATION PERFORMANCE ===")
+print(f"Pearson Correlation (r): {r_value:.4f}  <-- (Closer to 1.0 means the boom/bust cycles match perfectly)")
+print(f"R-squared (R^2):         {r_squared:.4f}  <-- (Closer to 1.0 means excellent model fit)")
+print(f"RMSE:                    {rmse:,.0f} buildings/bin  <-- (Average expected miss per 5-year block)")
+print(f"MAE:                     {mae:,.0f} buildings/bin  <-- (Absolute average miss)")
+print("====================================")
+# %%

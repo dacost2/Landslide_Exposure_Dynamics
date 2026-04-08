@@ -26,7 +26,7 @@ DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA Ge
 HISDAC_PATH = DATA_PATH / "HISDAC_US_V2"
 STATE_BOUNDARY_PATH = DATA_PATH / "cb_2024_us_state_500k.zip"
 TESTING_SET_PATH = DATA_PATH / "Testing_Set"
-BUILDING_INVENTORY_PATH = DATA_PATH / "LED_by_State"
+BUILDING_INVENTORY_PATH = DATA_PATH / "LED_by_State_GPKG"
 
 HISDAC_DATASETS = {
     "BUPR": HISDAC_PATH / "Historical_Built-up_Records_BUPR_V2",
@@ -377,10 +377,10 @@ except Exception as e:
 # --- 1. Define led_joined (The Spatial Link) ---
 print("1) Loading Spatial Anchor and LED Inventory...")
 # spatial_anchor_path = TESTING_SET_PATH / f"{state_code}_HISDAC_Spatial_Anchor.gpkg"
-led_file_path = BUILDING_INVENTORY_PATH / f"{state_name}_LED.parquet"
+led_file_path = BUILDING_INVENTORY_PATH / f"{state_name}_LED.gpkg"
 
 # spatial_anchor = gpd.read_file(spatial_anchor_path)
-led_points = gpd.read_parquet(led_file_path)
+led_points = gpd.read_file(led_file_path)
 
 print("2) Spatially joining LED buildings to HISDAC grid...")
 # Ensure CRS matches before joining
@@ -449,10 +449,13 @@ master_matrix.to_parquet(master_out_path, index=False)
 print("5) Saving Building-Level Inventory...")
 led_joined_out_path = TESTING_SET_PATH / f"{state_code}_LED_Joined_Buildings.parquet"
 
-# Drop geometry for lightning-fast Parquet tabular storage. 
+# NEW 03-04: Store data with HISDAC_id for each building as geopackage for gis
+led_joined.to_file(TESTING_SET_PATH / f"{state_code}_LED_Joined_Buildings.gpkg", driver="GPKG")
+# Drop geometry for lightning-fast Parquet tabular storage.
 # You can always rejoin it to your spatial LED file later via the LED ID.
-led_tabular = pd.DataFrame(led_joined.drop(columns='geometry'))
-led_tabular.to_parquet(led_joined_out_path, index=False)
+led_joined.drop(columns='geometry').to_parquet(led_joined_out_path, index=False)
+
+
 
 print(f"SUCCESS! Master Matrix saved to: {master_out_path}")
 print(f"SUCCESS! Joined Buildings saved to: {led_joined_out_path}")

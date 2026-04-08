@@ -5,7 +5,7 @@ import geopandas as gpd
 from tqdm import tqdm
 
 LED_PATH = Path('/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 1 - Exposure analysis/AGU Submission/AGU Earth Future - Initial Submission Package/data_release/US_final_population_building_inventory_pointData_with_socioeconomic-vMar12-2026.gpkg')
-OUTPUT_DIR = Path('/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data/LED_by_State_v2')
+OUTPUT_DIR = Path('/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data/LED_by_State_GPKG')
 
 # Create output directory if it doesn't exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

@@ -37,6 +37,7 @@ cumulative_exposure_P = {c: np.zeros(len(YEARS)) for c in hazard_classes}
 cumulative_exposure_D = {c: np.zeros(len(YEARS)) for c in hazard_classes}
 
 # --- 3. Probabilistic Execution ---
+# %%
 if mode in ['p', 'all']:
     print("\n2a) Running Probabilistic Engine...")
     
@@ -147,6 +148,7 @@ if mode in ['d', 'all']:
             exposed_in_pixel = det_matrix[c].values * growth_ratio
             cumulative_exposure_D[c][y_idx] = exposed_in_pixel.sum()
 
+# %%
 # --- 5. Visualization (If Comparing Both) ---
 if mode == 'all':
     print("\n3) Generating Comparison Plot...")
@@ -167,7 +169,7 @@ if mode == 'all':
         ax.plot(YEARS, cumulative_exposure_D[c], color=color, linestyle='--', linewidth=2, 
                 alpha=0.7, label=f"{c.capitalize()} (Deterministic Baseline)")
 
-    ax.set_title("Methodological Comparison: Does assuming static exposure fractions skew history?", fontsize=12)
+    ax.set_title("State-level Methodological Comparison", fontsize=12)
     ax.set_ylabel("Total Cumulative Buildings Exposed")
     ax.set_xlabel("Year")
     ax.set_xticks(YEARS)
@@ -252,6 +254,116 @@ if mode == 'all':
         ax.plot(YEARS, cum_exp_D_sea[c], color=color, linestyle='--', linewidth=2, 
                 alpha=0.7, label=f"{c.capitalize()} (Deterministic Baseline)")
 
+    ax.set_title("Regional Methodological Comparison", fontsize=12)
+    ax.set_ylabel("Total Cumulative Buildings Exposed")
+    ax.set_xlabel("Year")
+    ax.set_xticks(YEARS)
+    ax.tick_params(axis='x', rotation=45)
+    ax.grid(True, linestyle='--', alpha=0.6)
+    
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, loc='upper left', ncol=2)
+    
+    plt.tight_layout()
+    plt.show()
+
+print("\nAll tasks completed!")
+# %%
+# ==============================================================================
+# --- 6. MSA Zoom-In: Seattle-Tacoma-Bellevue (UPDATED WITH BORDER FIX) ---
+# ==============================================================================
+import geopandas as gpd
+
+if mode == 'all':
+    print("\n--- 4) Running Regional Subset: Seattle-Tacoma-Bellevue MSA ---")
+    
+    CBSA_PATH = DATA_PATH / "cb_2018_us_cbsa_500k.zip"
+    LED_SPATIAL_PATH = TESTING_SET_PATH / f"{state_code}_LED_points-5070.gpkg" 
+    
+    print("   -> Loading and filtering CBSA Shapefile...")
+    cbsa_gdf = gpd.read_file(f"zip://{CBSA_PATH}")
+    seattle_msa = cbsa_gdf[cbsa_gdf['NAME'] == 'Seattle-Tacoma-Bellevue, WA'].copy()
+    
+    print("   -> Loading spatial footprints and intersecting...")
+    led_spatial = gpd.read_file(LED_SPATIAL_PATH)
+    seattle_msa = seattle_msa.to_crs(led_spatial.crs)
+    
+    # Keep only buildings inside the Seattle MSA
+    seattle_buildings = gpd.sjoin(led_spatial, seattle_msa, how="inner", predicate="intersects")
+    
+    # Filter our main led_df 
+    led_seattle = led_df.loc[led_df.index.isin(seattle_buildings.index)].copy()
+    
+    # Get the unique HISDAC pixels that exist within this MSA
+    seattle_hids = led_seattle['HISDAC_id'].unique()
+    det_seattle = det_matrix[det_matrix.index.isin(seattle_hids)].copy()
+
+    # -------------------------------------------------------------------------
+    # --- THE FIX: The Border Pixel Correction ---
+    # We must RE-CALCULATE the 2020 absolute LED counts using ONLY the buildings
+    # that physically fell inside the MSA boundary. 
+    print("   -> Recalculating 2020 anchors for MSA border pixels...")
+    led_counts_sea = led_seattle.groupby(['HISDAC_id', 'susc_class']).size().unstack(fill_value=0)
+
+    # Drop the statewide hazard columns from det_seattle
+    cols_to_drop = [c for c in hazard_classes if c in det_seattle.columns]
+    det_seattle = det_seattle.drop(columns=cols_to_drop)
+
+    # Ensure all hazard classes exist in the new local counts, then join them back
+    for c in hazard_classes:
+        if c not in led_counts_sea.columns:
+            led_counts_sea[c] = 0
+            
+    det_seattle = det_seattle.join(led_counts_sea[hazard_classes], how='left')
+    det_seattle[hazard_classes] = det_seattle[hazard_classes].fillna(0)
+    # -------------------------------------------------------------------------
+
+    # --- Re-Calculate Probabilistic (Seattle) ---
+    print("   -> Re-aggregating Probabilistic Engine for Seattle MSA...")
+    cum_exp_P_sea = {c: np.zeros(len(YEARS)) for c in hazard_classes}
+    prob_matrix_sea = np.stack(led_seattle['prob_distribution'].values)
+    cum_prob_matrix_sea = np.cumsum(prob_matrix_sea, axis=1)
+    
+    for c in hazard_classes:
+        mask = led_seattle['susc_class'] == c
+        if mask.sum() > 0:
+            cum_exp_P_sea[c] = np.sum(cum_prob_matrix_sea[mask], axis=0)
+
+    # --- Re-Calculate Deterministic (Seattle) ---
+    print("   -> Re-aggregating Deterministic Engine for Seattle MSA...")
+    cum_exp_D_sea = {c: np.zeros(len(YEARS)) for c in hazard_classes}
+    cumulative_hisdac_sea = np.zeros(len(det_seattle))
+    
+    for y_idx, y in enumerate(YEARS):
+        cumulative_hisdac_sea += det_seattle[f'D_BUPL{y}'].fillna(0).values
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            growth_ratio_sea = np.where(det_seattle['Total_HISDAC'] > 0,
+                                        cumulative_hisdac_sea / det_seattle['Total_HISDAC'],
+                                        0)
+        # Force 2020 ratio to exactly 1.0
+        if y == 2020:
+            growth_ratio_sea = np.where(det_seattle['Total_HISDAC'] == 0, 1.0, growth_ratio_sea)
+            
+        for c in hazard_classes:
+            # We are now multiplying by the properly clipped MSA border totals
+            exposed_in_pixel_sea = det_seattle[c].values * growth_ratio_sea
+            cum_exp_D_sea[c][y_idx] = exposed_in_pixel_sea.sum()
+
+    # --- Plot the Regional Comparison ---
+    print("   -> Generating Regional Comparison Plot...")
+    fig, ax = plt.subplots(figsize=(14, 8))
+    fig.suptitle(f"Cumulative Landslide Exposure: Seattle-Tacoma-Bellevue MSA", fontsize=16, fontweight='bold')
+    
+    color_map = {'high': '#d62728', 'moderate': '#ff7f0e', 'low': '#f1c40f', 'none': '#7f8c8d'}
+    
+    for c in ['high', 'moderate', 'low']:
+        color = color_map[c]
+        ax.plot(YEARS, cum_exp_P_sea[c], color=color, linestyle='-', linewidth=3, 
+                marker='o', label=f"{c.capitalize()} (Probabilistic)")
+        ax.plot(YEARS, cum_exp_D_sea[c], color=color, linestyle='--', linewidth=2, 
+                alpha=0.7, label=f"{c.capitalize()} (Deterministic Baseline)")
+
     ax.set_title("Regional Methodological Comparison: The Urban Core Dynamics", fontsize=12)
     ax.set_ylabel("Total Cumulative Buildings Exposed")
     ax.set_xlabel("Year")
@@ -266,3 +378,123 @@ if mode == 'all':
     plt.show()
 
 print("\nAll tasks completed!")
+# %%
+# ==============================================================================
+# --- 7. Exposure Rate Analytics (Statewide) ---
+# ==============================================================================
+if mode == 'all':
+    print("\n--- 5) Calculating Statewide Exposure Rates E(t) ---")
+    
+    # 1. Calculate Total Built Environment per year for both models
+    # We sum across ALL hazard classes (including 'none') to get the true denominator
+    total_built_P = np.zeros(len(YEARS))
+    total_built_D = np.zeros(len(YEARS))
+    
+    for c in hazard_classes:
+        total_built_P += cumulative_exposure_P[c]
+        total_built_D += cumulative_exposure_D[c]
+
+    # 2. Calculate Exposure Rates (%)
+    rate_P = {c: np.zeros(len(YEARS)) for c in hazard_classes}
+    rate_D = {c: np.zeros(len(YEARS)) for c in hazard_classes}
+    
+    for c in hazard_classes:
+        # np.errstate prevents division by zero warnings in 1920 if the state was entirely empty
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rate_P[c] = np.where(total_built_P > 0, (cumulative_exposure_P[c] / total_built_P) * 100, 0)
+            rate_D[c] = np.where(total_built_D > 0, (cumulative_exposure_D[c] / total_built_D) * 100, 0)
+
+    # 3. Plotting the Rates
+    print("   -> Generating Exposure Rate Comparison Plot...")
+    fig, ax = plt.subplots(figsize=(14, 8))
+    fig.suptitle(f"Landslide Exposure Rate E(t): Probabilistic vs Deterministic ({state_code})", fontsize=16, fontweight='bold')
+    
+    # Use the same color map from the previous sections
+    color_map = {'high': '#d62728', 'moderate': '#ff7f0e', 'low': '#f1c40f', 'none': '#7f8c8d'}
+    
+    for c in ['high', 'moderate', 'low']: # Skip 'none' to focus purely on the hazard share
+        color = color_map[c]
+        
+        # Probabilistic (Solid Line)
+        ax.plot(YEARS, rate_P[c], color=color, linestyle='-', linewidth=3, 
+                marker='o', label=f"{c.capitalize()} Rate (Probabilistic)")
+        
+        # Deterministic (Dashed Line)
+        ax.plot(YEARS, rate_D[c], color=color, linestyle='--', linewidth=2, 
+                alpha=0.7, label=f"{c.capitalize()} Rate (Deterministic)")
+
+    ax.set_title("E(t) = Exposed Buildings / Total Buildings", fontsize=12)
+    ax.set_ylabel("Exposure Rate (%)")
+    ax.set_xlabel("Year")
+    ax.set_xticks(YEARS)
+    ax.tick_params(axis='x', rotation=45)
+    ax.grid(True, linestyle='--', alpha=0.6)
+    
+    # Organize legend
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, loc='upper left', ncol=2)
+    
+    plt.tight_layout()
+    plt.show()
+
+print("\nPipeline Complete!")
+# %%
+# ==============================================================================
+# --- 8. Exposure Rate Analytics (Seattle-Tacoma-Bellevue MSA) ---
+# ==============================================================================
+if mode == 'all':
+    print("\n--- 5) Calculating Regional Exposure Rates E(t) for Seattle MSA ---")
+    
+    # 1. Calculate Total Built Environment per year for the MSA
+    # We sum across ALL hazard classes (including 'none') to get the true denominator
+    total_built_P_sea = np.zeros(len(YEARS))
+    total_built_D_sea = np.zeros(len(YEARS))
+    
+    for c in hazard_classes:
+        total_built_P_sea += cum_exp_P_sea[c]
+        total_built_D_sea += cum_exp_D_sea[c]
+
+    # 2. Calculate Exposure Rates (%)
+    rate_P_sea = {c: np.zeros(len(YEARS)) for c in hazard_classes}
+    rate_D_sea = {c: np.zeros(len(YEARS)) for c in hazard_classes}
+    
+    for c in hazard_classes:
+        # np.errstate prevents division by zero warnings for early empty decades
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rate_P_sea[c] = np.where(total_built_P_sea > 0, (cum_exp_P_sea[c] / total_built_P_sea) * 100, 0)
+            rate_D_sea[c] = np.where(total_built_D_sea > 0, (cum_exp_D_sea[c] / total_built_D_sea) * 100, 0)
+
+    # 3. Plotting the Regional Rates
+    print("   -> Generating Regional Exposure Rate Comparison Plot...")
+    fig, ax = plt.subplots(figsize=(14, 8))
+    fig.suptitle("Landslide Exposure Rate E(t): Seattle-Tacoma-Bellevue MSA", fontsize=16, fontweight='bold')
+    
+    color_map = {'high': '#d62728', 'moderate': '#ff7f0e', 'low': '#f1c40f', 'none': '#7f8c8d'}
+    
+    for c in ['high', 'moderate', 'low']: # Skip 'none' to focus purely on the hazard share
+        color = color_map[c]
+        
+        # Probabilistic (Solid Line)
+        ax.plot(YEARS, rate_P_sea[c], color=color, linestyle='-', linewidth=3, 
+                marker='o', label=f"{c.capitalize()} Rate (Probabilistic)")
+        
+        # Deterministic (Dashed Line)
+        ax.plot(YEARS, rate_D_sea[c], color=color, linestyle='--', linewidth=2, 
+                alpha=0.7, label=f"{c.capitalize()} Rate (Deterministic Baseline)")
+
+    ax.set_title("E(t) = Exposed Buildings / Total Buildings", fontsize=12)
+    ax.set_ylabel("Exposure Rate (%)")
+    ax.set_xlabel("Year")
+    ax.set_xticks(YEARS)
+    ax.tick_params(axis='x', rotation=45)
+    ax.grid(True, linestyle='--', alpha=0.6)
+    
+    # Organize legend
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, loc='upper left', ncol=2)
+    
+    plt.tight_layout()
+    plt.show()
+# %%
+print("\nAll tasks completed!")
+# %%
