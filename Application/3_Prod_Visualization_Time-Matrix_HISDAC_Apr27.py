@@ -1,7 +1,6 @@
 # %% [markdown]
-# # Visualization and Analytics Engine (Production)
+# # Visualization and Analytics Engine (Production - 1940 Baseline)
 # #### Daniel Acosta-Reyes
-# April 07, 2026
 # %%
 import pandas as pd
 import numpy as np
@@ -9,6 +8,8 @@ import matplotlib.pyplot as plt
 import geopandas as gpd
 from pathlib import Path
 import argparse
+import os
+import sys
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import warnings
 
@@ -17,9 +18,15 @@ warnings.filterwarnings('ignore')
 
 # --- 1. Argparse Setup for Master Controller ---
 parser = argparse.ArgumentParser(description="Run Analytics and Visualization for a specific state.")
-parser.add_argument("--state", type=str, required=True, help="2-letter state code (e.g., WA)")
+parser.add_argument("--state", type=str, required=False, help="2-letter state code (e.g., WA)")
 args, unknown = parser.parse_known_args()
-STATE_CODE = args.state.upper()
+if args.state:
+    STATE_CODE = args.state.upper()
+elif "ipykernel" in sys.argv[0] or "ipykernel" in sys.modules:
+    STATE_CODE = os.getenv("STATE_CODE", "AL").upper()
+    print(f"[INFO] No --state provided in interactive session. Using STATE_CODE={STATE_CODE}.")
+else:
+    parser.error("the following arguments are required: --state")
 
 # --- 2. Setup Paths ---
 DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data")
@@ -29,7 +36,9 @@ PRODUCTION_ANALYTICS = ANALYSIS_PATH / "Production_analytics" / STATE_CODE
 
 PRODUCTION_ANALYTICS.mkdir(parents=True, exist_ok=True)
 CBSA_PATH = DATA_PATH / "cb_2018_us_cbsa_500k.zip"
-YEARS = np.arange(1920, 2025, 5)
+
+# UPDATE 1: Shift the baseline year to 1940
+YEARS = np.arange(1940, 2025, 5)
 
 print(f"=== Starting Analytics Engine for {STATE_CODE} ===")
 
@@ -44,27 +53,41 @@ det_centroids = gpd.read_file(PRODUCTION_SET_PATH / f"{STATE_CODE}_Deterministic
 def bin_to_semi_decade(series):
     y = pd.to_numeric(series, errors="coerce")
     sd = ((y - 1) // 5 + 1) * 5
-    return np.clip(sd, 1920, 2020)
+    # UPDATE 2: Ensure we clip back to 1940 instead of 1920
+    return np.clip(sd, 1940, 2020)
 
 led_engine['expected_bin'] = bin_to_semi_decade(led_engine['expected_year_built'])
-led_engine['map_bin'] = bin_to_semi_decade(led_engine['most_likely_year'])
+led_engine['map_bin'] = bin_to_semi_decade(led_engine['map_year_built'])
 
 # ==============================================================================
-# --- 4. Validation Metrics Matrix (Req 3) ---
+# --- NEW: 3.5 Tier Confidence Reporting ---
+# ==============================================================================
+print("1b) Generating HSA Confidence Tier Breakdown...")
+if 'Parent_Pixel_Tier' in led_engine.columns:
+    tier_counts = led_engine['Parent_Pixel_Tier'].value_counts().reset_index()
+    tier_counts.columns = ['Confidence_Tier', 'Building_Count']
+    tier_counts['Percentage'] = (tier_counts['Building_Count'] / len(led_engine)) * 100
+    
+    tier_out_path = PRODUCTION_ANALYTICS / f"{STATE_CODE}_Tier_Confidence_Breakdown.csv"
+    tier_counts.to_csv(tier_out_path, index=False)
+    print(f"   -> Saved Tier Breakdown to Analytics folder.")
+
+# ==============================================================================
+# --- 4. Validation Metrics Matrix ---
 # ==============================================================================
 print("2) Calculating Temporal Validation Metrics...")
 
 hisdac_cols = [f"D_BUPL{y}" for y in YEARS]
 hisdac_counts = master_df[hisdac_cols].sum().values
 
-# Extract counts for the three LED variations
 raw_counts = led_engine['semi_decade'].value_counts().reindex(YEARS, fill_value=0).values
 exp_counts = led_engine['expected_bin'].value_counts().reindex(YEARS, fill_value=0).values
 map_counts = led_engine['map_bin'].value_counts().reindex(YEARS, fill_value=0).values
 
 # A) Volume Check
-hisdac_total_2020 = hisdac_counts.sum()
+hisdac_total_2020 = master_df['C_BUPL2020'].sum()
 led_total_2020 = len(led_engine)
+
 abs_diff = led_total_2020 - hisdac_total_2020
 pct_diff = (abs_diff / hisdac_total_2020) * 100 if hisdac_total_2020 > 0 else np.nan
 
@@ -113,7 +136,7 @@ final_metrics = pd.concat([metrics_df, stats_df], ignore_index=True)
 final_metrics.to_csv(PRODUCTION_ANALYTICS / f"{STATE_CODE}_Metrics_Summary.csv", index=False)
 
 # ==============================================================================
-# --- 5. The Tri-Curve Plot (Req 4) ---
+# --- 5. The Tri-Curve Plot ---
 # ==============================================================================
 print("3) Generating Tri-Curve Plot...")
 fig, ax = plt.subplots(figsize=(14, 6))
@@ -125,6 +148,7 @@ ax.plot(YEARS, hisdac_counts, color='blue', marker='o', linestyle='-', linewidth
 
 ax.set_title(f'Temporal Reconstruction Fit: {STATE_CODE}', fontsize=14, fontweight='bold')
 ax.set_ylabel('New Buildings Added')
+ax.set_xlabel('Year')
 ax.set_xticks(YEARS)
 ax.tick_params(axis='x', rotation=45)
 ax.grid(axis='y', linestyle='--', alpha=0.5)
@@ -135,18 +159,18 @@ fig.savefig(PRODUCTION_ANALYTICS / f"{STATE_CODE}_Temporal_TriCurve.png", dpi=30
 plt.close(fig)
 
 # ==============================================================================
-# --- 6. The Exposure Story Core Logic (Req 5) ---
+# --- 6. The Exposure Story Core Logic ---
 # ==============================================================================
 print("4) Processing 'The Story' DataFrames...")
-CHECK_YEARS = [1920, 1940, 1960, 1980, 2000, 2020]
+# UPDATE 3: Adjust the key visualization check-years to match the new 1940 baseline
+CHECK_YEARS = [1940, 1960, 1980, 2000, 2020]
 HAZARDS = ['high', 'moderate', 'low', 'none']
 
 def calculate_story(led_subset, det_subset, region_name):
-    """Calculates Cumulative and Marginal exposure for Probabilistic and Deterministic models."""
     story_records = []
     
     # --- PROBABILISTIC (Building Level) ---
-    prob_counts = led_subset.groupby(['expected_bin', 'susc_class']).size().unstack(fill_value=0).reindex(YEARS, fill_value=0)
+    prob_counts = led_subset.groupby(['map_bin', 'susc_class']).size().unstack(fill_value=0).reindex(YEARS, fill_value=0)
     for h in HAZARDS:
         if h not in prob_counts.columns: prob_counts[h] = 0
             
@@ -158,26 +182,28 @@ def calculate_story(led_subset, det_subset, region_name):
 
     # --- DETERMINISTIC (Pixel Level Ratios) ---
     det_cum = {h: np.zeros(len(YEARS)) for h in HAZARDS}
-    det_subset['Total_HISDAC'] = det_subset[[f'D_BUPL{y}' for y in YEARS]].sum(axis=1)
-    cum_hisdac = np.zeros(len(det_subset))
+    det_subset['Total_HISDAC'] = det_subset['C_BUPL2020'].fillna(0)
     
     for i, y in enumerate(YEARS):
-        cum_hisdac += det_subset[f'D_BUPL{y}'].fillna(0).values
-        ratio = np.where(det_subset['Total_HISDAC'] > 0, cum_hisdac / det_subset['Total_HISDAC'], 0)
-        if y == 2020: ratio = np.where(det_subset['Total_HISDAC'] == 0, 1.0, ratio)
+        cum_hisdac = det_subset[f'C_BUPL{y}'].fillna(0).values
+        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = np.where(det_subset['Total_HISDAC'] > 0, cum_hisdac / det_subset['Total_HISDAC'], 0)
+            
+        if y == 2020: 
+            ratio = np.where(det_subset['Total_HISDAC'] == 0, 1.0, ratio)
+            
         for h in HAZARDS:
             det_cum[h][i] = (det_subset[h].values * ratio).sum()
             
     det_cum_df = pd.DataFrame(det_cum, index=YEARS)
     det_cum_df['Total'] = det_cum_df.sum(axis=1)
     
-    # Calculate Marginal via diff()
     det_marg_df = det_cum_df.diff().fillna(det_cum_df.iloc[0])
     
     # --- Extract Check Years ---
     for y in CHECK_YEARS:
         for h in HAZARDS:
-            # Probabilistic
             c_vol_p = prob_cum.loc[y, h]
             c_tot_p = prob_cum.loc[y, 'Total']
             m_vol_p = prob_marg.loc[y, h]
@@ -189,7 +215,6 @@ def calculate_story(led_subset, det_subset, region_name):
                 'Marginal_Vol': m_vol_p, 'Marginal_Rate_%': (m_vol_p/m_tot_p*100) if m_tot_p > 0 else 0
             })
             
-            # Deterministic
             c_vol_d = det_cum_df.loc[y, h]
             c_tot_d = det_cum_df.loc[y, 'Total']
             m_vol_d = det_marg_df.loc[y, h]
@@ -211,10 +236,8 @@ state_story_df.to_csv(PRODUCTION_ANALYTICS / f"{STATE_CODE}_State_Exposure_Story
 print("5) Spatially Joining CBSAs and Generating Metro Stories...")
 cbsa_gdf = gpd.read_file(f"zip://{CBSA_PATH}")
 
-# Project to match points
 cbsa_gdf = cbsa_gdf.to_crs(led_points.crs)
 
-# Identify which CBSAs intersect this state's buildings
 led_with_cbsa = gpd.sjoin(led_points, cbsa_gdf[['NAME', 'geometry']], how='inner', predicate='intersects')
 cbsa_names = led_with_cbsa['NAME'].unique()
 
@@ -224,13 +247,11 @@ if len(cbsa_names) > 0:
     
     cbsa_story_dfs = []
     for cbsa in cbsa_names:
-        # Filter datasets via index/HISDAC matching
         cbsa_led_indices = led_with_cbsa[led_with_cbsa['NAME'] == cbsa].index
         cbsa_led_subset = led_engine.loc[cbsa_led_indices]
         
         cbsa_det_subset = det_with_cbsa[det_with_cbsa['NAME'] == cbsa].copy()
         
-        # Recalculate story for this metro
         if len(cbsa_led_subset) > 0:
             cbsa_story = calculate_story(cbsa_led_subset, cbsa_det_subset, cbsa)
             cbsa_story_dfs.append(cbsa_story)
@@ -251,67 +272,54 @@ if len(cbsa_names) > 0:
     print("6) Generating 3x2 CBSA Spatial Map Grids (Both Methods)...")
     import matplotlib.colors as mcolors
 
-    # 1. Load State Boundary for visual background context
     STATE_BOUNDARY_PATH = DATA_PATH / "cb_2024_us_state_500k.zip"
     state_boundaries = gpd.read_file(f"zip://{STATE_BOUNDARY_PATH}")
     state_geom = state_boundaries[state_boundaries['STUSPS'] == STATE_CODE].to_crs(cbsa_gdf.crs)
     
-    # 2. Filter for High Hazard to calculate GLOBAL min/max for the colorbars
     high_hazard_df = final_cbsa_df[final_cbsa_df['Hazard'] == 'high']
     
-    # Calculate global limits for Absolute Volume
     vmin_vol = high_hazard_df['Cum_Vol'].min()
     vmax_vol = high_hazard_df['Cum_Vol'].max()
     if vmin_vol == vmax_vol: vmax_vol = vmin_vol + 1
         
-    # Calculate global limits for Exposure Rate
     vmin_rate = high_hazard_df['Cum_Rate_%'].min()
     vmax_rate = high_hazard_df['Cum_Rate_%'].max()
     if vmin_rate == vmax_rate: vmax_rate = vmin_rate + 1
 
-    # 3. Create Map Generation Function
     def generate_3x2_map_grid(metric_col, title_metric_name, cmap, filename_suffix, method_name, vmin, vmax):
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        fig.suptitle(f"High-Hazard Landslide {title_metric_name} ({method_name} Baseline)\nCBSA: {STATE_CODE}", fontsize=20, fontweight='bold')
+        fig.suptitle(f"High-Susceptibility Landslide {title_metric_name} ({method_name} Baseline)\nCBSA: {STATE_CODE}", fontsize=20, fontweight='bold')
         axes = axes.flatten()
         
-        # Filter the story data for the specific method we are plotting
         map_story_df = high_hazard_df[high_hazard_df['Method'] == method_name]
         
         for i, year in enumerate(CHECK_YEARS):
             ax = axes[i]
             
-            # Plot the state background
             state_geom.plot(ax=ax, color='#e0e0e0', edgecolor='white', linewidth=1.5)
             
-            # Filter data for the specific year
             year_data = map_story_df[map_story_df['Year'] == year]
             
-            # Merge back to CBSA geometries
-            map_data = cbsa_gdf.merge(year_data, on='NAME', how='inner')
+            map_data = cbsa_gdf.merge(year_data, left_on='NAME', right_on='Region', how='inner')
             
             if not map_data.empty:
-                # Plot the CBSAs using the GLOBAL vmin and vmax
                 map_data.plot(column=metric_col, cmap=cmap, ax=ax, 
                               vmin=vmin, vmax=vmax, edgecolor='black', linewidth=0.5)
             
             ax.set_title(f"Year: {year}", fontsize=14, fontweight='bold')
             ax.set_axis_off()
             
-        # Add a single, unified colorbar to the figure
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
         sm._A = []
-        cbar_ax = fig.add_axes([0.15, 0.05, 0.7, 0.03]) # [left, bottom, width, height]
+        cbar_ax = fig.add_axes([0.15, 0.05, 0.7, 0.03]) 
         fig.colorbar(sm, cax=cbar_ax, orientation='horizontal', label=title_metric_name)
         
-        plt.tight_layout(rect=[0, 0.08, 1, 0.93]) # Adjust bounds to fit colorbar and the 2-line title
+        plt.tight_layout(rect=[0, 0.08, 1, 0.93]) 
         
-        # Save with the method appended to the filename
         final_filename = f"{STATE_CODE}_{filename_suffix}_{method_name}.png"
         plt.savefig(PRODUCTION_ANALYTICS / final_filename, dpi=300, bbox_inches='tight')
         plt.close(fig)
 
-    # 4. Execute the mapping function for both methods
     for method in ['Probabilistic', 'Deterministic']:
         print(f"   -> Rendering {method} Maps...")
         

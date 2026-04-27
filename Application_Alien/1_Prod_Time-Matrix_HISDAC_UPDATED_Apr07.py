@@ -10,8 +10,6 @@ import geopandas as gpd
 import numpy as np
 import re
 import argparse
-import os
-import sys
 from pathlib import Path
 import rasterio
 from rasterio.mask import mask as rio_mask
@@ -19,18 +17,13 @@ from shapely.geometry import box
 
 # --- 1. Argparse Setup for Master Controller ---
 parser = argparse.ArgumentParser(description="Process HISDAC Matrices for a specific state.")
-parser.add_argument("--state", type=str, required=False, help="2-letter state code (e.g., WA)")
+parser.add_argument("--state", type=str, required=True, help="2-letter state code (e.g., WA)")
+# Use parse_known_args to play nicely if running inside an interactive Jupyter environment by mistake
 args, unknown = parser.parse_known_args()
-if args.state:
-    STATE_CODE = args.state.upper()
-elif "ipykernel" in sys.argv[0] or "ipykernel" in sys.modules:
-    STATE_CODE = os.getenv("STATE_CODE", "AL").upper()
-    print(f"[INFO] No --state provided in interactive session. Using STATE_CODE={STATE_CODE}.")
-else:
-    parser.error("the following arguments are required: --state")
+STATE_CODE = args.state.upper()
 
 # --- 2. Paths & State Dictionary ---
-DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data")
+DATA_PATH = Path(r"C:\Users\danie\OneDrive - UW\0 - DA General Exam\Paper 2 - Temporal Dynamics\Data")
 HISDAC_PATH = DATA_PATH / "HISDAC_US_V2"
 STATE_BOUNDARY_PATH = DATA_PATH / "tl_2024_us_state/tl_2024_us_state.shp"
 BUILDING_INVENTORY_PATH = DATA_PATH / "LED_by_State_GPKG"
@@ -173,6 +166,40 @@ def main():
     density = np.where(bupl_vals > 0, bupr_vals / bupl_vals, 0)
     matrix_data["DENSITY"] = density
 
+    # 5. Time-Series Delta Processing
+    # print("4) Processing BUPR and BUPL Time Series Deltas...")
+    # bupl_years = get_available_years(HISDAC_DATASETS["BUPL"], "BUPL")
+    # target_years = sorted([y for y in bupl_years if 1915 <= int(y) <= 2020])
+    
+    # bupr_years = get_available_years(HISDAC_DATASETS["BUPR"], "BUPR")
+    # target_bupr_years = sorted([y for y in bupr_years if 1915 <= int(y) <= 2020])
+    
+    # # Process BUPR Deltas
+    # bupr_time_arrays = {}
+    # for year in target_bupr_years:
+    #     file_path = find_dataset_file("BUPR", HISDAC_DATASETS["BUPR"], year)
+    #     arr, _ = get_clipped_array(file_path, wa_boundary)
+    #     bupr_time_arrays[year] = arr[valid_rows, valid_cols]
+
+    # for i in range(1, len(target_bupr_years)):
+    #     prev_yr, curr_yr = target_bupr_years[i-1], target_bupr_years[i]
+    #     delta = np.maximum(0, bupr_time_arrays[curr_yr] - bupr_time_arrays[prev_yr])
+    #     matrix_data[f"D_BUPR{curr_yr}"] = delta
+    # matrix_data[f"D_BUPR{target_bupr_years[0]}"] = bupr_time_arrays[target_bupr_years[0]]
+    
+    # # Process BUPL Deltas
+    # bupl_time_arrays = {}
+    # for year in target_years:
+    #     file_path = find_dataset_file("BUPL", HISDAC_DATASETS["BUPL"], year)
+    #     arr, _ = get_clipped_array(file_path, wa_boundary)
+    #     bupl_time_arrays[year] = arr[valid_rows, valid_cols]
+
+    # for i in range(1, len(target_years)):
+    #     prev_yr, curr_yr = target_years[i-1], target_years[i]
+    #     delta = np.maximum(0, bupl_time_arrays[curr_yr] - bupl_time_arrays[prev_yr])
+    #     matrix_data[f"D_BUPL{curr_yr}"] = delta
+    # matrix_data[f"D_BUPL{target_years[0]}"] = bupl_time_arrays[target_years[0]]
+
     # -- NEW CODE FOR BUPR/BUPL TIME SERIES (Direct Cumulative Values) APR 09 ---
     # 5. Time-Series Delta Processing
     print("4) Processing BUPR and BUPL Time Series (Cumulative & Deltas)...")
@@ -212,7 +239,7 @@ def main():
         matrix_data[f"D_BUPL{curr_yr}"] = delta
     matrix_data[f"D_BUPL{target_years[0]}"] = bupl_time_arrays[target_years[0]]
 
-# 6. Assemble the Temporary Massive Matrix
+    # 6. Assemble the Temporary Massive Matrix
     print("5) Assembling Temporary Statewide Matrix...")
     wide_matrix_df = pd.DataFrame(matrix_data)
 
@@ -290,4 +317,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# %%

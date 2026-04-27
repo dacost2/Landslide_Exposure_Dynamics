@@ -11,24 +11,16 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import argparse
-import os
-import sys
 
 # --- 1. Argparse Setup for Master Controller ---
 parser = argparse.ArgumentParser(description="Run Methods and Analytics for a specific state.")
-parser.add_argument("--state", type=str, required=False, help="2-letter state code (e.g., WA)")
+parser.add_argument("--state", type=str, required=True, help="2-letter state code (e.g., WA)")
 args, unknown = parser.parse_known_args()
-if args.state:
-    STATE_CODE = args.state.upper()
-elif "ipykernel" in sys.argv[0] or "ipykernel" in sys.modules:
-    STATE_CODE = os.getenv("STATE_CODE", "AL").upper()
-    print(f"[INFO] No --state provided in interactive session. Using STATE_CODE={STATE_CODE}.")
-else:
-    parser.error("the following arguments are required: --state")
+STATE_CODE = args.state.upper()
 
 # --- 2. Setup & Load Datasets ---
-DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data")
-ANALYSIS_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Analysis")
+DATA_PATH = Path(r"C:\Users\danie\OneDrive - UW\0 - DA General Exam\Paper 2 - Temporal Dynamics\Data")
+ANALYSIS_PATH = DATA_PATH.parent / "Analysis"
 
 PRODUCTION_SET_PATH = DATA_PATH / "Production_set" / STATE_CODE
 PRODUCTION_ANALYTICS = ANALYSIS_PATH / "Production_analytics" / STATE_CODE
@@ -116,8 +108,6 @@ def generate_probability_array(row):
     # if np.sum(prob_array) > 0: return prob_array / np.sum(prob_array)
     # return np.ones(21) / 21
 
-    # ... [keep the top part of the function the same] ...
-    
     if source_nsi == 'nsi_estimated':
         recent_idx = slice(16, 21)
         deficits = np.maximum(0, hisdac_bupl[recent_idx] - led_counts[recent_idx])
@@ -141,9 +131,6 @@ def generate_probability_array(row):
 
 tqdm.pandas(desc="Calculating Probabilities")
 led_df['prob_distribution'] = led_df.progress_apply(generate_probability_array, axis=1)
-
-# Extract the single highest probability year for map plotting
-led_df['map_year_built'] = led_df['prob_distribution'].apply(lambda x: YEARS[np.argmax(x)])
 
 # Calculate Expected Values
 prob_matrix = np.stack(led_df['prob_distribution'].values)
@@ -205,6 +192,7 @@ for y_idx, y in enumerate(YEARS):
     for c in hazard_classes:
         exposed_in_pixel = det_matrix[c].values * growth_ratio
         cumulative_exposure_D[c][y_idx] = exposed_in_pixel.sum()
+
 
 # ==============================================================================
 # --- 5. Exposure Rate Analytics & Visualization ---
@@ -281,7 +269,6 @@ led_df['expected_year_built'] = np.round(np.sum(prob_matrix * YEARS, axis=1)).as
 
 # Maximum A Posteriori (MAP)
 led_df['map_year_built'] = YEARS[np.argmax(prob_matrix, axis=1)]
-
 
 print("5) Saving Master Parquet Engine (with probability arrays)...")
 out_parquet = PRODUCTION_SET_PATH / f"{STATE_CODE}_LED_Monte_Carlo_Engine.parquet"

@@ -1,7 +1,6 @@
 # %% [markdown]
-# # HISDAC Time Matrix Construction (Production Optimized)
+# # HISDAC Time Matrix Construction (Production Optimized - 1940 Baseline + Land Use)
 # #### Daniel Acosta-Reyes
-# April 07, 2026
 # %%
 from __future__ import annotations
 
@@ -35,14 +34,15 @@ HISDAC_PATH = DATA_PATH / "HISDAC_US_V2"
 STATE_BOUNDARY_PATH = DATA_PATH / "tl_2024_us_state/tl_2024_us_state.shp"
 BUILDING_INVENTORY_PATH = DATA_PATH / "LED_by_State_GPKG"
 
-# Create state-specific production directory
 PRODUCTION_SET_PATH = DATA_PATH / "Production_set" / STATE_CODE
 PRODUCTION_SET_PATH.mkdir(parents=True, exist_ok=True)
 
+# UPDATE 4a: Added Land Use Path
 HISDAC_DATASETS = {
     "BUPR": HISDAC_PATH / "Historical_Built-up_Records_BUPR_V2",
     "BUPL": HISDAC_PATH / "Historical_Built-up_Property_Locations_BUPL_V2",
-    "FBUY": HISDAC_PATH / "Historical_Settlement_Year_Built_Layer_1810-2020_V2"
+    "FBUY": HISDAC_PATH / "Historical_Settlement_Year_Built_Layer_1810-2020_V2",
+    "LANDUSE": HISDAC_PATH / "Historical_Land_Use_1940-2020_Major_Class_V2" / "Majority"
 }
 
 state_dict = {
@@ -64,14 +64,11 @@ if not STATE_NAME:
     raise ValueError(f"Invalid state code provided: {STATE_CODE}")
 
 # --- 3. Optimized Helper Functions ---
-
-# OPTIMIZATION: Cache the file paths so we don't rglob the entire disk inside a loop
 FILE_CACHE = {}
 
 def index_dataset_files(dataset_path: Path):
-    """Scans a dataset directory ONCE and caches the file paths."""
     if dataset_path not in FILE_CACHE:
-        FILE_CACHE[dataset_path] = list(dataset_path.rglob("*.[st][hi][pf]*")) # Matches .shp and .tif
+        FILE_CACHE[dataset_path] = list(dataset_path.rglob("*.[st][hi][pf]*"))
     return FILE_CACHE[dataset_path]
 
 def get_available_years(dataset_path: Path, dataset_name: str) -> list[str]:
@@ -101,7 +98,6 @@ def find_dataset_file(dataset_name: str, dataset_path: Path, year: str | None = 
     if not candidates:
         raise FileNotFoundError(f"No file found for {dataset_name}, year {year}")
         
-    # Prefer exact names and .shp, sort by path depth
     candidates.sort(key=lambda p: (len(p.parts), 0 if p.suffix.lower() == '.shp' else 1, str(p)))
     return candidates[0]
 
@@ -115,7 +111,6 @@ def get_clipped_array(raster_path: Path, clip_boundary: gpd.GeoDataFrame) -> tup
         return band, transform
 
 def build_spatial_anchor(base_array: np.ndarray, transform: object, raster_crs: object) -> tuple[gpd.GeoDataFrame, np.ndarray, np.ndarray]:    
-    # Grab ALL land pixels (empty wilderness included) for the temporary massive grid
     valid_mask = ~np.isnan(base_array) 
     rows, cols = np.where(valid_mask)
     
@@ -130,7 +125,7 @@ def build_spatial_anchor(base_array: np.ndarray, transform: object, raster_crs: 
     gdf["HISDAC_id"] = np.arange(1, len(gdf) + 1)
     return gdf, rows, cols
 
-def semidecade_from_med_yr_blt(series: pd.Series, baseline_year: int = 1920, max_year: int = 2020) -> pd.Series:
+def semidecade_from_med_yr_blt(series: pd.Series, baseline_year: int = 1940, max_year: int = 2020) -> pd.Series:
     y = pd.to_numeric(series, errors="coerce")
     semi_decade = ((y - 1) // 5 + 1) * 5
     semi_decade = np.where(semi_decade < baseline_year, baseline_year, semi_decade)
@@ -142,11 +137,9 @@ def semidecade_from_med_yr_blt(series: pd.Series, baseline_year: int = 1920, max
 def main():
     print(f"=== Processing {STATE_NAME} ({STATE_CODE}) ===")
     
-    # 1. Boundaries
     state_boundaries = gpd.read_file(STATE_BOUNDARY_PATH)
     wa_boundary = state_boundaries[state_boundaries["STUSPS"] == STATE_CODE]
 
-    # 2. Establish Spatial Anchor
     print("1) Generating Spatial Anchor from BUPL 2020...")
     bupl_2020_file = find_dataset_file("BUPL", HISDAC_DATASETS["BUPL"], "2020")
     base_array, transform = get_clipped_array(bupl_2020_file, wa_boundary)
@@ -157,13 +150,11 @@ def main():
     spatial_anchor, valid_rows, valid_cols = build_spatial_anchor(base_array, transform, raster_crs)
     matrix_data = {"HISDAC_id": spatial_anchor["HISDAC_id"].values}
 
-    # 3. Extract FBUY
     print("2) Extracting FBUY...")
     fbuy_file = find_dataset_file("FBUY", HISDAC_DATASETS["FBUY"])
     fbuy_array, _ = get_clipped_array(fbuy_file, wa_boundary)
     matrix_data["FBUY"] = fbuy_array[valid_rows, valid_cols]
 
-    # 4. Extract Density
     print("3) Calculating Structural Density...")
     bupr_2020_file = find_dataset_file("BUPR", HISDAC_DATASETS["BUPR"], "2020")
     bupr_array, _ = get_clipped_array(bupr_2020_file, wa_boundary)
@@ -173,22 +164,19 @@ def main():
     density = np.where(bupl_vals > 0, bupr_vals / bupl_vals, 0)
     matrix_data["DENSITY"] = density
 
-    # -- NEW CODE FOR BUPR/BUPL TIME SERIES (Direct Cumulative Values) APR 09 ---
-    # 5. Time-Series Delta Processing
-    print("4) Processing BUPR and BUPL Time Series (Cumulative & Deltas)...")
+    print("4) Processing Time Series (BUPL, BUPR, and Land Use)...")
     bupl_years = get_available_years(HISDAC_DATASETS["BUPL"], "BUPL")
-    target_years = sorted([y for y in bupl_years if 1915 <= int(y) <= 2020])
+    target_years = sorted([y for y in bupl_years if 1940 <= int(y) <= 2020])
     
     bupr_years = get_available_years(HISDAC_DATASETS["BUPR"], "BUPR")
-    target_bupr_years = sorted([y for y in bupr_years if 1915 <= int(y) <= 2020])
+    target_bupr_years = sorted([y for y in bupr_years if 1940 <= int(y) <= 2020])
     
-    # Process BUPR (Snapshots & Deltas)
+    # Process BUPR
     bupr_time_arrays = {}
     for year in target_bupr_years:
         file_path = find_dataset_file("BUPR", HISDAC_DATASETS["BUPR"], year)
         arr, _ = get_clipped_array(file_path, wa_boundary)
         bupr_time_arrays[year] = arr[valid_rows, valid_cols]
-        # ---> NEW: Save the Raw Cumulative Snapshot
         matrix_data[f"C_BUPR{year}"] = bupr_time_arrays[year]
 
     for i in range(1, len(target_bupr_years)):
@@ -197,13 +185,12 @@ def main():
         matrix_data[f"D_BUPR{curr_yr}"] = delta
     matrix_data[f"D_BUPR{target_bupr_years[0]}"] = bupr_time_arrays[target_bupr_years[0]]
     
-    # Process BUPL (Snapshots & Deltas)
+    # Process BUPL
     bupl_time_arrays = {}
     for year in target_years:
         file_path = find_dataset_file("BUPL", HISDAC_DATASETS["BUPL"], year)
         arr, _ = get_clipped_array(file_path, wa_boundary)
         bupl_time_arrays[year] = arr[valid_rows, valid_cols]
-        # ---> NEW: Save the Raw Cumulative Snapshot
         matrix_data[f"C_BUPL{year}"] = bupl_time_arrays[year]
 
     for i in range(1, len(target_years)):
@@ -212,11 +199,21 @@ def main():
         matrix_data[f"D_BUPL{curr_yr}"] = delta
     matrix_data[f"D_BUPL{target_years[0]}"] = bupl_time_arrays[target_years[0]]
 
-# 6. Assemble the Temporary Massive Matrix
+    # UPDATE 4b: Process Land Use Time Series
+    print("   -> Extracting HISDAC Majority Land Use...")
+    for year in target_years:
+        try:
+            # The naming convention is 'Majority_1940.tif'
+            file_path = find_dataset_file("Majority", HISDAC_DATASETS["LANDUSE"], year)
+            arr, _ = get_clipped_array(file_path, wa_boundary)
+            matrix_data[f"LU_{year}"] = arr[valid_rows, valid_cols]
+        except FileNotFoundError:
+            print(f"      [WARNING] Could not find Land Use raster for year {year}. Filling with NaN.")
+            matrix_data[f"LU_{year}"] = np.nan
+
     print("5) Assembling Temporary Statewide Matrix...")
     wide_matrix_df = pd.DataFrame(matrix_data)
 
-    # 7. LED Integration & Spatial Join
     print("6) Loading LED Inventory and Joining to Grid...")
     led_file_path = BUILDING_INVENTORY_PATH / f"{STATE_NAME}_LED.gpkg"
     led_points = gpd.read_file(led_file_path)
@@ -224,39 +221,35 @@ def main():
     if led_points.crs != spatial_anchor.crs:
         led_points = led_points.to_crs(spatial_anchor.crs)
 
-    # Use INTERSECTS so buildings on the razor-edge of a pixel are not dropped
     led_joined = gpd.sjoin(led_points, spatial_anchor[["HISDAC_id", "geometry"]], how="inner", predicate="intersects")
-    
-    # Drop edge-case duplicates if a point landed perfectly on a pixel boundary
     led_joined = led_joined[~led_joined.index.duplicated(keep='first')] 
     
     led_joined["semi_decade"] = semidecade_from_med_yr_blt(led_joined["med_yr_blt"])
 
-    # ====================================================================
-    # 8. THE CLEANUP: Purge empty pixels that caught no LED buildings
-    # ====================================================================
+    # UPDATE 5: Calculate the most frequent st_damcat per pixel (for Tier 2 Area-Level)
+    print("   -> Calculating LED Majority Occupancy per pixel...")
+    if 'st_damcat' in led_joined.columns:
+        led_occ = led_joined.groupby('HISDAC_id')['st_damcat'].agg(
+            lambda x: x.mode()[0] if not x.mode().empty else 'UNKNOWN'
+        ).reset_index()
+        led_occ.rename(columns={'st_damcat': 'LED_Majority_Use'}, inplace=True)
+    else:
+        led_occ = pd.DataFrame(columns=['HISDAC_id', 'LED_Majority_Use'])
+
     print("7) Purging Empty Wilderness Pixels...")
-    
-    # Find all pixel IDs that caught an LED footprint
     pixels_with_led = led_joined["HISDAC_id"].unique()
-    
-    # Find all pixel IDs that have a historical HISDAC footprint
     pixels_with_history = wide_matrix_df[wide_matrix_df["C_BUPL2020"] > 0]["HISDAC_id"].unique()
-    
-    # Keep the pixel ONLY if it has historical data OR modern LED data
     valid_pixels = np.union1d(pixels_with_history, pixels_with_led)
     
-    # Apply the purge
     spatial_anchor = spatial_anchor[spatial_anchor["HISDAC_id"].isin(valid_pixels)]
     wide_matrix_df = wide_matrix_df[wide_matrix_df["HISDAC_id"].isin(valid_pixels)]
-    # ====================================================================
 
     print("8) Pivoting LED and Merging Final Master Matrix...")
     led_wide = pd.crosstab(index=led_joined["HISDAC_id"], columns=led_joined["semi_decade"], dropna=False)
     led_wide.columns = [f"LED_{int(col)}" for col in led_wide.columns]
     led_wide = led_wide.reset_index()
 
-    expected_years = range(1920, 2025, 5)
+    expected_years = range(1940, 2025, 5)
     for year in expected_years:
         if f"LED_{year}" not in led_wide.columns:
             led_wide[f"LED_{year}"] = 0
@@ -264,11 +257,14 @@ def main():
     col_order = ["HISDAC_id"] + [f"LED_{y}" for y in expected_years]
     led_wide = led_wide[col_order]
 
+    # Merge Time Arrays and the new LED Occupancy column
     master_matrix = wide_matrix_df.merge(led_wide, on="HISDAC_id", how="left")
-    led_cols = [col for col in master_matrix.columns if col.startswith("LED_")]
+    master_matrix = master_matrix.merge(led_occ, on="HISDAC_id", how="left")
+    
+    led_cols = [col for col in master_matrix.columns if col.startswith("LED_") and col != "LED_Majority_Use"]
     master_matrix[led_cols] = master_matrix[led_cols].fillna(0).astype(int)
+    master_matrix['LED_Majority_Use'] = master_matrix['LED_Majority_Use'].fillna('UNKNOWN')
 
-    # 9. Final Exports
     print("9) Saving Optimized Production Files...")
     spatial_out = PRODUCTION_SET_PATH / f"{STATE_CODE}_HISDAC_Spatial_Anchor.gpkg"
     spatial_anchor.to_file(spatial_out, driver="GPKG")
@@ -279,7 +275,6 @@ def main():
     master_out_path = PRODUCTION_SET_PATH / f"{STATE_CODE}_Master_Spatiotemporal_Matrix.parquet"
     master_matrix.to_parquet(master_out_path, index=False)
 
-    # Export GPKG and Parquet for the joined building inventory
     led_joined_gpkg = PRODUCTION_SET_PATH / f"{STATE_CODE}_LED_Joined_Buildings.gpkg"
     led_joined_parquet = PRODUCTION_SET_PATH / f"{STATE_CODE}_LED_Joined_Buildings.parquet"
     
@@ -290,4 +285,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# %%

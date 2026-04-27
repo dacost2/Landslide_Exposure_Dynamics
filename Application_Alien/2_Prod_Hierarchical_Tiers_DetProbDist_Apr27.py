@@ -1,7 +1,6 @@
 # %% [markdown]
-# # Deterministic vs Probabilistic Exposure Trajectories (Production)
+# # Deterministic vs Probabilistic Exposure Trajectories (Production - 1940 Baseline)
 # #### Daniel Acosta-Reyes
-# April 07, 2026
 # %%
 import pandas as pd
 import numpy as np
@@ -27,8 +26,8 @@ else:
     parser.error("the following arguments are required: --state")
 
 # --- 2. Setup & Load Datasets ---
-DATA_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Data")
-ANALYSIS_PATH = Path("/Users/danielacosta/Library/CloudStorage/OneDrive-UW/0 - DA General Exam/Paper 2 - Temporal Dynamics/Analysis")
+DATA_PATH = Path(r"C:\Users\danie\OneDrive - UW\0 - DA General Exam\Paper 2 - Temporal Dynamics\Data")
+ANALYSIS_PATH = Path(r"C:\Users\danie\OneDrive - UW\0 - DA General Exam\Paper 2 - Temporal Dynamics\Analysis")
 
 PRODUCTION_SET_PATH = DATA_PATH / "Production_set" / STATE_CODE
 PRODUCTION_ANALYTICS = ANALYSIS_PATH / "Production_analytics" / STATE_CODE
@@ -36,7 +35,9 @@ PRODUCTION_ANALYTICS = ANALYSIS_PATH / "Production_analytics" / STATE_CODE
 # Ensure analytics directory exists for this specific state
 PRODUCTION_ANALYTICS.mkdir(parents=True, exist_ok=True)
 
-YEARS = np.arange(1920, 2025, 5)
+# UPDATE 1: Shift the baseline year to 1940
+YEARS = np.arange(1940, 2025, 5)
+ARRAY_LEN = len(YEARS) # Will be 17
 
 print(f"=== Starting Methods Pipeline for {STATE_CODE} ===")
 print("1) Loading Datasets...")
@@ -58,18 +59,19 @@ hazard_classes = ['none', 'low', 'moderate', 'high']
 master_idx = master_df.set_index('HISDAC_id')
 
 # Dictionaries to store the final exposure trajectories
-cumulative_exposure_P = {c: np.zeros(len(YEARS)) for c in hazard_classes}
-cumulative_exposure_D = {c: np.zeros(len(YEARS)) for c in hazard_classes}
+cumulative_exposure_P = {c: np.zeros(ARRAY_LEN) for c in hazard_classes}
+cumulative_exposure_D = {c: np.zeros(ARRAY_LEN) for c in hazard_classes}
 
 # ==============================================================================
-# --- 3. Probabilistic Execution ---
+# --- 3. Probabilistic Execution (Tier 3 Core) ---
 # ==============================================================================
 print("\n2a) Running Probabilistic Engine...")
 
 def generate_probability_array(row):
     hid = row['HISDAC_id']
     if hid not in master_idx.index:
-        prob_array = np.zeros(21)
+        # UPDATE 2: Dynamic array length based on the YEARS variable
+        prob_array = np.zeros(ARRAY_LEN)
         year_idx = np.where(YEARS == row['semi_decade'])[0][0]
         prob_array[year_idx] = 1.0
         return prob_array
@@ -85,7 +87,7 @@ def generate_probability_array(row):
     density = pixel['DENSITY']
     fbuy = pixel['FBUY']
     
-    prob_array = np.zeros(21)
+    prob_array = np.zeros(ARRAY_LEN)
     
     if pd.isna(fbuy) or np.sum(hisdac_bupl) == 0:
         year_idx = np.where(YEARS == led_year)[0][0]
@@ -96,30 +98,10 @@ def generate_probability_array(row):
         if stories > 3:
             hisdac_bupr = np.array([pixel[f'D_BUPR{y}'] for y in YEARS])
             if np.sum(hisdac_bupr) > 0: return hisdac_bupr / np.sum(hisdac_bupr)
-            # return np.ones(21) / 21
-        # else:
-        #     base_dist = hisdac_bupl / np.sum(hisdac_bupl)
-        #     gaussian_weights = norm.pdf(YEARS, loc=led_year, scale=10)
-        #     prob_array = base_dist * gaussian_weights
-        #     return prob_array / np.sum(prob_array) if np.sum(prob_array) > 0 else base_dist
 
-    # if source_nsi == 'nsi_estimated':
-    #     recent_idx = slice(16, 21)
-    #     deficits = np.maximum(0, hisdac_bupl[recent_idx] - led_counts[recent_idx])
-    #     if np.sum(deficits) > 0:
-    #         prob_array[recent_idx] = deficits / np.sum(deficits)
-    #         return prob_array
-
-    # base_dist = hisdac_bupl / np.sum(hisdac_bupl)
-    # gaussian_weights = norm.pdf(YEARS, loc=led_year, scale=5)
-    # prob_array = base_dist * gaussian_weights
-    # if np.sum(prob_array) > 0: return prob_array / np.sum(prob_array)
-    # return np.ones(21) / 21
-
-    # ... [keep the top part of the function the same] ...
-    
     if source_nsi == 'nsi_estimated':
-        recent_idx = slice(16, 21)
+        # UPDATE 3: Dynamic slice for the last 20 years (last 5 elements)
+        recent_idx = slice(ARRAY_LEN - 5, ARRAY_LEN)
         deficits = np.maximum(0, hisdac_bupl[recent_idx] - led_counts[recent_idx])
         if np.sum(deficits) > 0:
             prob_array[recent_idx] = deficits / np.sum(deficits)
@@ -136,16 +118,14 @@ def generate_probability_array(row):
     if np.sum(prob_array) > 0: 
         return prob_array / np.sum(prob_array)
         
-    # 4. THE FIX: If NSI completely misses the HISDAC history, TRUST HISDAC.
+    # 4. If NSI completely misses the HISDAC history, TRUST HISDAC.
     return base_dist
 
 tqdm.pandas(desc="Calculating Probabilities")
 led_df['prob_distribution'] = led_df.progress_apply(generate_probability_array, axis=1)
 
-# Extract the single highest probability year for map plotting
 led_df['map_year_built'] = led_df['prob_distribution'].apply(lambda x: YEARS[np.argmax(x)])
 
-# Calculate Expected Values
 prob_matrix = np.stack(led_df['prob_distribution'].values)
 cum_prob_matrix = np.cumsum(prob_matrix, axis=1)
 
@@ -155,11 +135,10 @@ for c in hazard_classes:
         cumulative_exposure_P[c] = np.sum(cum_prob_matrix[mask], axis=0)
 
 # ==============================================================================
-# --- 4. Deterministic Execution (Area-Level Method) --- NEW APR 10
+# --- 4. Deterministic Execution (Area-Level Method) ---
 # ==============================================================================
 print("\n2b) Running Deterministic Engine (Area-Level Method)...")
 
-# --- Prepare the hazard counts for the modern LED ---
 led_exposed_counts = led_df.groupby(['HISDAC_id', 'susc_class']).size().unstack(fill_value=0)
 det_matrix = master_df.join(led_exposed_counts, on='HISDAC_id', how='left')
 
@@ -168,40 +147,37 @@ for c in hazard_classes:
         det_matrix[c] = 0
 det_matrix[hazard_classes] = det_matrix[hazard_classes].fillna(0)
 
-# Total LED exposure in this pixel for the ratio fallback
 det_matrix['Total_LED_2020'] = det_matrix[hazard_classes].sum(axis=1)
-
-# The 2020 total anchor
 det_matrix['Total_HISDAC'] = det_matrix['C_BUPL2020'].fillna(0)
 det_matrix['Cumulative_LED_Fallback'] = 0
 
+# UPDATE 4: Implement the HSF Tiers of Confidence Tagging (Pixel Level)
+det_matrix['Confidence_Tier'] = np.where(
+    det_matrix['Total_HISDAC'] > 0, 
+    'Tier 1 (High - HISDAC Concordance)', 
+    'Tier 2 (Moderate - LED Fallback)'
+)
+
 for y_idx, y in enumerate(YEARS):
-    # 1. Grab the HISDAC snapshot directly
     cumulative_hisdac = det_matrix[f'C_BUPL{y}'].fillna(0).values
     
-    # 2. Accumulate the LED counts for the fallback curve
     if f'LED_{y}' in det_matrix.columns:
         det_matrix['Cumulative_LED_Fallback'] += det_matrix[f'LED_{y}'].fillna(0)
     
     with np.errstate(divide='ignore', invalid='ignore'):
-        # Calculate Primary HISDAC Ratio
         ratio_hisdac = np.where(det_matrix['Total_HISDAC'] > 0,
                                 cumulative_hisdac / det_matrix['Total_HISDAC'],
                                 0)
         
-        # Calculate Fallback LED Ratio (for when HISDAC is blind)
         ratio_led = np.where(det_matrix['Total_LED_2020'] > 0,
                              det_matrix['Cumulative_LED_Fallback'] / det_matrix['Total_LED_2020'],
                              0)
                              
-    # 3. Combine: Use HISDAC if it exists, otherwise use LED fallback
     growth_ratio = np.where(det_matrix['Total_HISDAC'] > 0, ratio_hisdac, ratio_led)
     
-    # Force 2020 to exactly 1.0 across the board to catch any tiny rounding decimals
     if y == 2020:
         growth_ratio = 1.0
         
-    # 4. Calculate Final Exposure
     for c in hazard_classes:
         exposed_in_pixel = det_matrix[c].values * growth_ratio
         cumulative_exposure_D[c][y_idx] = exposed_in_pixel.sum()
@@ -211,15 +187,15 @@ for y_idx, y in enumerate(YEARS):
 # ==============================================================================
 print("\n3) Generating Analytics and Plots...")
 
-total_built_P = np.zeros(len(YEARS))
-total_built_D = np.zeros(len(YEARS))
+total_built_P = np.zeros(ARRAY_LEN)
+total_built_D = np.zeros(ARRAY_LEN)
 
 for c in hazard_classes:
     total_built_P += cumulative_exposure_P[c]
     total_built_D += cumulative_exposure_D[c]
 
-rate_P = {c: np.zeros(len(YEARS)) for c in hazard_classes}
-rate_D = {c: np.zeros(len(YEARS)) for c in hazard_classes}
+rate_P = {c: np.zeros(ARRAY_LEN) for c in hazard_classes}
+rate_D = {c: np.zeros(ARRAY_LEN) for c in hazard_classes}
 
 for c in hazard_classes:
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -247,7 +223,7 @@ ax1.legend(loc='upper left', ncol=2)
 
 fig1.tight_layout()
 fig1.savefig(PRODUCTION_ANALYTICS / f"{STATE_CODE}_Exposure_Cumulative_Comparison.png", dpi=300, bbox_inches='tight')
-plt.close(fig1) # Prevent memory leaks in batch processing
+plt.close(fig1)
 
 # --- PLOT 2: Exposure Rates ---
 fig2, ax2 = plt.subplots(figsize=(14, 8))
@@ -276,12 +252,17 @@ plt.close(fig2)
 # ==============================================================================
 print("\n4) Calculating Final Model Metrics...")
 
-# Expected Value (Mean) - Rounded to integer
 led_df['expected_year_built'] = np.round(np.sum(prob_matrix * YEARS, axis=1)).astype(int)
-
-# Maximum A Posteriori (MAP)
 led_df['map_year_built'] = YEARS[np.argmax(prob_matrix, axis=1)]
 
+# UPDATE 5: Implement the HSF Tiers of Confidence Tagging (Building Level)
+print("   -> Applying Confidence Tiers...")
+# All Probabilistic results are inherently Tier 3.
+led_df['Confidence_Tier'] = 'Tier 3 (Modeled - Bayesian Inference)'
+
+# For data transparency, we map the parent pixel's Tier onto the building so researchers know its foundation
+parent_tiers = det_matrix[['HISDAC_id', 'Confidence_Tier']].rename(columns={'Confidence_Tier': 'Parent_Pixel_Tier'})
+led_df = led_df.merge(parent_tiers, on='HISDAC_id', how='left')
 
 print("5) Saving Master Parquet Engine (with probability arrays)...")
 out_parquet = PRODUCTION_SET_PATH / f"{STATE_CODE}_LED_Monte_Carlo_Engine.parquet"
@@ -301,15 +282,11 @@ gdf_prob.to_file(prob_gpkg, driver='GPKG')
 
 # --- EXPORT B: Deterministic Model (Pixel Level Centroids) ---
 print(f"   -> Exporting Deterministic Pixel Centroids...")
-# Merge spatial anchor geometry with deterministic matrix
 det_spatial = det_matrix.merge(spatial_anchor[['HISDAC_id', 'geometry']], on='HISDAC_id', how='left')
 gdf_det = gpd.GeoDataFrame(det_spatial, geometry='geometry', crs=spatial_anchor.crs)
-
-# Convert polygon grids to centroids for easy aggregation later
 gdf_det['geometry'] = gdf_det.geometry.centroid
 
 det_gpkg = PRODUCTION_SET_PATH / f"{STATE_CODE}_Deterministic_Pixel_Centroids.gpkg"
 gdf_det.to_file(det_gpkg, driver='GPKG')
-
 
 print(f"\n=== SCRIPT 2 COMPLETE FOR {STATE_CODE} ===")
